@@ -1,0 +1,16 @@
+# Data stays private (downloaded datasets + database)
+data/
+*.db
+
+# Secrets (none needed yet, but just in case)
+.env
+
+# Python / OS clutter
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+
+# Findings are published later, with the write-up
+results/
