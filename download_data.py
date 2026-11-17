@@ -6,15 +6,17 @@ compiled from stats.nba.com ("nbastats") and pbpstats.com ("pbpstats").
 Each file is a .tar.xz archive containing one CSV per season.
 
   nbastats_<year>  every play (who, what, score)          -> table pbp
-  pbpstats_<year>  one row per possession (start/end,     -> table possessions
-                   start type, score margin, shots...)
+  pbpstats_<year>  one row per play, grouped by           -> table possessions
+                   possession (start/end, start type,
+                   score margin, shots...)
+  ..._po_<year>    the same for the playoffs (column playoffs = 1)
 
 <year> is the season's START year (2024 = 2024-25). The dataset currently
-ends at 2024-25, so the default is the 5 seasons 2020-21 .. 2024-25.
+ends at 2024-25; the default is the 10 seasons 2015-16 .. 2024-25.
 
 Usage:
     pip install requests pandas
-    python download_data.py                 # default seasons
+    python download_data.py                 # default: 10 seasons
     python download_data.py 2023 2024       # specific seasons
 
 Output (all private - data/ is gitignored):
@@ -32,7 +34,7 @@ import pandas as pd
 import requests
 
 LIST_URL = "https://raw.githubusercontent.com/shufinskiy/nba_data/main/list_data.txt"
-SEASONS = [2020, 2021, 2022, 2023, 2024]
+SEASONS = list(range(2015, 2025))      # 2015-16 .. 2024-25
 SOURCES = {"nbastats": "pbp", "pbpstats": "possessions"}
 RAW = Path("data/raw")
 DB = Path("data/nba.db")
@@ -125,18 +127,20 @@ def main():
     for source, table in SOURCES.items():
         con.execute(f"DROP TABLE IF EXISTS {table}")
         for season in seasons:
-            name = f"{source}_{season}"
-            if name not in urls:
-                print(f"  ! {name} not in the dataset list - skipping")
-                continue
-            csv = extract_csv(download(name, urls[name]), name)
-            rows = 0
-            for chunk in pd.read_csv(csv, chunksize=200_000, low_memory=False):
-                chunk.columns = [c.lower() for c in chunk.columns]
-                chunk["season"] = season
-                chunk.to_sql(table, con, if_exists="append", index=False)
-                rows += len(chunk)
-            print(f"  {name}: {rows:,} rows -> {table}")
+            for playoffs, tag in ((0, ""), (1, "po_")):          # regular season, then playoffs
+                name = f"{source}_{tag}{season}"
+                if name not in urls:
+                    print(f"  ! {name} not in the dataset list - skipping")
+                    continue
+                csv = extract_csv(download(name, urls[name]), name)
+                rows = 0
+                for chunk in pd.read_csv(csv, chunksize=200_000, low_memory=False):
+                    chunk.columns = [c.lower() for c in chunk.columns]
+                    chunk["season"] = season
+                    chunk["playoffs"] = playoffs
+                    chunk.to_sql(table, con, if_exists="append", index=False)
+                    rows += len(chunk)
+                print(f"  {name}: {rows:,} rows -> {table}")
         con.commit()
 
     for table in SOURCES.values():

@@ -120,7 +120,8 @@ for side in ("home", "away"):
     pbp.loc[s.index, "pts"] = s.groupby("game_id")[f"{side}_score"].diff().fillna(s[f"{side}_score"])
 
 # ------------------------------------------------------------- possessions
-raw_cols = [r[1] for r in con.execute("PRAGMA table_info(possessions)") if r[1] != "url"]
+# skip the two bulky text columns we never use (video link, full event list)
+raw_cols = [r[1] for r in con.execute("PRAGMA table_info(possessions)") if r[1] not in ("url", "events")]
 raw = pd.read_sql_query(f"SELECT {', '.join(raw_cols)} FROM possessions", con)
 need(raw, ["gameid", "period", "starttime", "opponent", "startscoredifferential"], "possessions")
 raw = raw.rename(columns={"gameid": "game_id"})
@@ -149,19 +150,26 @@ pos["poss_num"] = pos.groupby("game_id").cumcount() + 1
 # The same text can occur twice in a period ("MISS Smith 3PT Jump Shot"), so
 # when there are several candidates keep the possession whose clock window
 # contains the play (or is nearest to it).
+def clean(text):
+    """The two files don't always spell names the same way ("Morris Sr." vs
+    "Morris", stray double spaces in 2017-19), so tidy both before matching."""
+    text = text.str.strip().str.replace(r"\s+", " ", regex=True)           # double spaces
+    return text.str.replace(r" (Jr\.|Sr\.|III|II|IV)(?=[ :]|$)", "", regex=True)
+
+
 ev_cols = ["pbp_id", "game_id", "period", "seconds_left"]
 long = pd.concat([
-    pbp.loc[pbp[c].notna(), ev_cols].assign(desc=pbp.loc[pbp[c].notna(), c].str.strip())
+    pbp.loc[pbp[c].notna(), ev_cols].assign(desc=clean(pbp.loc[pbp[c].notna(), c]))
     for c in ("homedescription", "visitordescription")])
 # Plays involving both teams (block + missed shot, steal + turnover) are
 # written as one line "home text: visitor text" in the possessions file.
 both = pbp[pbp["homedescription"].notna() & pbp["visitordescription"].notna()]
 long = pd.concat([long, both[ev_cols].assign(
-    desc=both["homedescription"].str.strip() + ": " + both["visitordescription"].str.strip())])
+    desc=clean(both["homedescription"]) + ": " + clean(both["visitordescription"]))])
 if has_desc:
     key = ["game_id", "period", "starttime", "endtime", "opponent"]
     cand = raw[key + ["description"]].dropna(subset=["description"])
-    cand = cand.assign(desc=cand["description"].str.strip()).drop(columns="description")
+    cand = cand.assign(desc=clean(cand["description"])).drop(columns="description")
     cand = cand.merge(pos[key + ["poss_num", "seconds_left", "end_seconds_left"]]
                       .rename(columns={"seconds_left": "p_start", "end_seconds_left": "p_end"}),
                       on=key).drop_duplicates(["game_id", "period", "desc", "poss_num"])
@@ -200,7 +208,7 @@ pos["points_ok"] = (pos["points"] == ev_off) if has_desc else pos["points"].betw
 pos["garbage"] = ((pos["period"] >= 4) & (pos["start_margin"].abs() >= GARBAGE_MARGIN)).astype(int)
 
 # ------------------------------------------------------------------ save
-keep = ["game_id", "season", "gamedate", "period", "seconds_left", "end_seconds_left",
+keep = ["game_id", "season", "playoffs", "gamedate", "period", "seconds_left", "end_seconds_left",
         "offense", "defense", "home", "away", "is_home", "start_margin", "points",
         "def_points", "points_ok", "starttype", "poss_num", "garbage",
         "fg2a", "fg2m", "fg3a", "fg3m", "turnovers", "offensiverebounds"]
