@@ -316,6 +316,13 @@ for label, res, group, ok in LAYERS:
                       **{f"half-life {h}": "{:+.2f} [{:+.2f}, {:+.2f}]".format(*got[(h, split)]) for h in HALF_LIVES}})
 sizes = pd.DataFrame(sizes)
 print(sizes.to_string(index=False))
+print("\n   How to read these tables. The primary test is ONE number: chain + players removed at half-life 4, in each of the")
+print("   three groups of regular seasons; the rest of Part A (and everything else this script prints) is description, so")
+print("   with this many numbers a few |z| above 2 are expected by chance. The last layer shuffles only within stretches")
+print("   with the same ten players: it keeps the differences between those stretches, and in simulated leagues it shows")
+print("   only about a third of a real carry-over, so it is not on the same scale as the layers above. Shuffling within")
+print("   quarters also absorbs part of a real effect (a planted one comes out roughly 2.4 times too small), so the")
+print("   numbers above are on the cautious side.")
 
 # Can the data tell us the half-life? For every half-life on a fine grid: how well does its momentum predict
 # the next possession (the correlation)? The best one in 2020-22, with a 95% range from re-drawing whole games
