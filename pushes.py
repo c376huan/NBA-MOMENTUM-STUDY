@@ -151,7 +151,7 @@ try:
         """SELECT p.game_id, p.poss_num, p.season, p.playoffs, p.gamedate, p.period, p.seconds_left, p.is_home, p.home, p.away,
                   p.starttype, p.points, p.def_points, p.turnovers, p.start_margin, p.end_seconds_left,
                   l.o1, l.o2, l.o3, l.o4, l.o5, l.d1, l.d2, l.d3, l.d4, l.d5, l.complete,
-                  m.rate_raw, m.before_off, m.before_def, m.ahead_own, m.ahead_opp
+                  m.rate_raw, m.rate_adj, m.before_off, m.before_def, m.ahead_own, m.ahead_opp
            FROM poss p JOIN poss_momentum m USING (game_id, poss_num) JOIN lineups l USING (game_id, poss_num)
            ORDER BY p.game_id, p.poss_num""", con)
     names = pd.read_sql_query("SELECT * FROM players", con).drop_duplicates("player_id").set_index("player_id")["player"]
@@ -265,6 +265,24 @@ for _ in range(B):
 chance = np.array(chance) if B else np.array([np.nan])
 Z95 = np.quantile(chance, 0.95) if B else np.nan
 
+# Shuffling also breaks the possession chain (how one possession ends sets how the next one starts), and the chain
+# alone makes real games clumpier than shuffled ones even with no momentum at all: a simulated league with no
+# momentum beat this chance level about as often as the real games do. So the comparison is repeated with the chain
+# taken out of every result (points against an expectation that knows how the possession started).
+real_adj, chance_adj, Z95_adj = np.array([np.nan]), np.array([np.nan]), np.nan
+if B:
+    x_adj = poss["rate_adj"].to_numpy() / 100 * sign
+    real_adj = np.array([z for g0, L in zip(game_start, game_len) for z in scan(x_adj[g0:g0 + L], live=False)])
+    adj_rng = np.random.default_rng(3)                      # its own generator, so the shuffles above are unchanged
+    adj_result, chance_adj = poss["rate_adj"].to_numpy() / 100, []
+    for _ in range(B):
+        new = np.empty(n)
+        new[order] = adj_result[order][np.argsort(grp_sorted + adj_rng.random(n))]
+        xs = new * sign
+        chance_adj += [z for g0, L in zip(game_start, game_len) for z in scan(xs[g0:g0 + L], live=False)]
+    chance_adj = np.array(chance_adj)
+    Z95_adj = np.quantile(chance_adj, 0.95)
+
 print(f"{n:,} possessions in {G:,} games.  One push per team per game: {len(pushes):,} pushes.\n")
 print("A. THE PUSHES")
 print(f"   A typical push: {pushes['pts_for'].median():.0f}-{pushes['pts_against'].median():.0f} over {pushes['n_poss'].median():.0f} possessions "
@@ -273,7 +291,10 @@ if B:
     print(f"   Strength of a team's biggest push: real games {pushes['strength'].mean():.2f} on average, shuffled games {chance.mean():.2f} "
           f"({pushes['strength'].mean() / chance.mean() - 1:+.1%}).")
     print(f"   Pushes stronger than 95% of what chance produces (strength above {Z95:.2f}): {(pushes['strength'] > Z95).mean():.1%} of real pushes "
-          f"(5.0% would be expected with no momentum at all).")
+          f"(5.0% if possessions were independent; the possession chain alone raises this, see the next line).")
+    print(f"   With the chain taken out of every result: real games {real_adj.mean():.2f}, shuffled games {chance_adj.mean():.2f} "
+          f"({real_adj.mean() / chance_adj.mean() - 1:+.1%}); {(real_adj > Z95_adj).mean():.1%} of real pushes beat the shuffled 95th percentile "
+          f"(5.0% expected with no momentum).")
 spread = lambda v: 100 * np.sqrt(max(v, 0.0))                # variance -> points per 100 possessions
 weight = lambda v: 0.0 if v <= 0 else np.median(game_len) / (np.median(game_len) + SIGMA ** 2 / v)
 print(f"\n   Normal level, or how the game has been going?  First half against second half of the same game (both vs "
