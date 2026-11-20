@@ -17,7 +17,8 @@ ends at 2024-25; the default is the 10 seasons 2015-16 .. 2024-25.
 Usage:
     pip install requests pandas
     python download_data.py                 # default: 10 seasons
-    python download_data.py 2023 2024       # specific seasons
+    python download_data.py 2023 2024       # specific seasons (replaces only those seasons)
+    python download_data.py --db data/x.db  # another database file (default data/nba.db)
 
 Output (all private - data/ is gitignored):
     data/raw/<name>.tar.xz   downloaded archives (kept so re-runs skip them)
@@ -37,7 +38,7 @@ LIST_URL = "https://raw.githubusercontent.com/shufinskiy/nba_data/main/list_data
 SEASONS = list(range(2015, 2025))      # 2015-16 .. 2024-25
 SOURCES = {"nbastats": "pbp", "pbpstats": "possessions"}
 RAW = Path("data/raw")
-DB = Path("data/nba.db")
+DB = Path(sys.argv[sys.argv.index("--db") + 1]) if "--db" in sys.argv else Path("data/nba.db")
 
 
 # --- Safety limits. We only ever fetch from this one GitHub repo, and we
@@ -119,13 +120,21 @@ def extract_csv(archive, name):
 
 
 def main():
-    seasons = [int(s) for s in sys.argv[1:]] or SEASONS
+    rest = sys.argv[1:]
+    if "--db" in rest:                                     # everything else on the command line is a season
+        i = rest.index("--db")
+        rest = rest[:i] + rest[i + 2:]
+    seasons = [int(s) for s in rest] or SEASONS
     RAW.mkdir(parents=True, exist_ok=True)
     urls = file_urls()
     con = sqlite3.connect(DB)
 
     for source, table in SOURCES.items():
-        con.execute(f"DROP TABLE IF EXISTS {table}")
+        exists = con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+        if rest and exists:          # only some seasons asked for: replace just those, keep the others
+            con.execute(f"DELETE FROM {table} WHERE season IN ({', '.join('?' * len(seasons))})", seasons)
+        else:
+            con.execute(f"DROP TABLE IF EXISTS {table}")
         for season in seasons:
             for playoffs, tag in ((0, ""), (1, "po_")):          # regular season, then playoffs
                 name = f"{source}_{tag}{season}"
