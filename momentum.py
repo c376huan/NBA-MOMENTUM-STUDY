@@ -20,10 +20,17 @@ possessions"). Everything is built from one quantity:
         game at zero, so a rate built on few possessions stays near neutral.
 
   HALF-LIFE = how fast older possessions fade (keep = 0.5 ^ (1/half-life)).
-        It is ESTIMATED: the value whose momentum best predicts the next
-        possession, with a 95% range from re-drawing games (bootstrap),
-        using seasons 2020-22 only. Other seasons and the playoffs then
-        check everything. Part A also shows results at half-lives 1 to 32.
+        The data cannot estimate it. After Part A the script prints, for
+        each layer, the half-life whose momentum best predicts the next
+        possession, with a 95% range from re-drawing whole games
+        (bootstrap): on the raw rates it is the shortest one tried, i.e.
+        the very last possession - that is the possession chain, not
+        momentum - and once the chain is removed the best value jumps
+        around from one group of seasons to the next. So Part A shows every
+        half-life from 1 to 32, and Parts B and D and the saved table use a
+        declared REFERENCE half-life of 2.8 of a team's own possessions
+        (about a minute and a half of play), with the key numbers repeated
+        at half-lives 1 and 8.
 
 Parts:
  A. Carry-over. If a team has +10 of momentum, how much of it shows up on
@@ -52,7 +59,7 @@ possession) for players.py and coaches.py.
 
 Usage:
     python momentum.py [--db data/fake_nba.db] [--shuffles 40] [--game 22400001]
-    python momentum.py --db data/fake_nba.db --half-life 2.8   # test league: use the real-data half-life
+    python momentum.py --half-life 4        # a different reference half-life (default 2.8)
 """
 
 import sqlite3
@@ -74,9 +81,10 @@ def arg(name, default):
 DB = arg("--db", "data/nba.db")
 B = arg("--shuffles", 40)
 GAME = arg("--game", 0)
-FORCED_H = arg("--half-life", 0.0)       # normally 0 = estimate it; tests can pass the real-data value
-HALF_LIVES = (1, 2, 4, 8, 16, 32)     # a full range, not a choice - see docstring
-EXPLORE = (2020, 2021, 2022)          # seasons used to choose the half-life
+H = arg("--half-life", 2 ** 1.5)      # reference half-life for Parts B and D and the saved table (see docstring)
+H_LO, H_HI = 1.0, 8.0                 # ... repeated at these two, to show how much the answers depend on it
+HALF_LIVES = (1, 2, 4, 8, 16, 32)     # Part A: a full range, not a choice
+EXPLORE = (2020, 2021, 2022)          # seasons for the half-life diagnostic; the other groups are checks
 rng = np.random.default_rng(0)
 pd.set_option("display.width", 250)
 
@@ -119,8 +127,8 @@ new_game = np.r_[True, gidx[1:] != gidx[:-1]]
 first = np.r_[True, (gidx[1:] != gidx[:-1]) | (period[1:] != period[:-1])]   # first possession of a period
 last = np.r_[first[1:], True]
 
-SPLITS = {"2020-22 (used to choose)": np.isin(season, EXPLORE) & ~playoffs, "2023-24 (check)": (season > max(EXPLORE)) & ~playoffs,
-          "2015-19 (check)": (season < min(EXPLORE)) & ~playoffs, "playoffs (check)": playoffs}
+SPLITS = {"2020-22": np.isin(season, EXPLORE) & ~playoffs, "2023-24": (season > max(EXPLORE)) & ~playoffs,
+          "2015-19": (season < min(EXPLORE)) & ~playoffs, "playoffs": playoffs}
 SPLITS = {k: v for k, v in SPLITS.items() if v.any()}
 if len(SPLITS) == 1:
     SPLITS = {"all": np.ones(n, bool)}
@@ -226,33 +234,49 @@ for label, res, group, ok in LAYERS:
 results_a = pd.DataFrame(results_a)
 print(results_a.to_string(index=False))
 
-# The half-life is ESTIMATED, not picked: on a fine grid, find the one whose momentum predicts the
-# next possession best (highest correlation) in the choosing seasons. The interval comes from
-# re-drawing whole games with replacement (bootstrap) and repeating the search.
+# Can the data tell us the half-life? For every half-life on a fine grid: how well does its momentum predict
+# the next possession (the correlation)? The best one in 2020-22, with a 95% range from re-drawing whole games
+# with replacement (bootstrap), and the best one in each other group of seasons as a check. Shown for the raw
+# rates and for the two adjusted versions. (The analyses below do NOT use the winner - see the docstring.)
 fine = np.exp(np.linspace(np.log(0.5), np.log(64), 29))
-per_game = []
-for h in fine:
-    off, de = momentum_before(res_raw, h)
-    m_ = (off - de)[choose]
-    d_ = pd.DataFrame({"g": gidx[choose], "xy": m_ * res_raw[choose], "xx": m_ * m_}).groupby("g").sum()
-    per_game.append(d_.to_numpy())
-per_game = np.array(per_game)                              # (half-life, game, [xy, xx])
 
 
-def best(weights):
+def per_game_sums(res, ok):
+    """For each group of seasons: (half-life, game, [sum of momentum x result, sum of momentum^2])."""
+    sums = {name: np.zeros((len(fine), G, 2)) for name in SPLITS}
+    for a, h in enumerate(fine):
+        off, de = momentum_before(res, h)
+        mom = off - de
+        for name, mask in SPLITS.items():
+            m_ = mask & ok
+            sums[name][a, :, 0] = np.bincount(gidx[m_], weights=mom[m_] * res[m_], minlength=G)
+            sums[name][a, :, 1] = np.bincount(gidx[m_], weights=mom[m_] ** 2, minlength=G)
+    return {name: sums[name][:, np.unique(gidx[mask & ok])] for name, mask in SPLITS.items()}
+
+
+def best(per_game, weights=1.0):
     xy, xx = (per_game[:, :, 0] * weights).sum(1), (per_game[:, :, 1] * weights).sum(1)
     return fine[np.argmax(xy / np.sqrt(xx))]
 
 
-n_g = per_game.shape[1]
-H = float(best(np.ones(n_g)))
-boot = np.array([best(np.bincount(rng.integers(0, n_g, n_g), minlength=n_g)) for _ in range(500)])
-H_LO, H_HI = (float(v) for v in np.quantile(boot, [0.025, 0.975]))
-print(f"\n   Estimated half-life (the one that predicts the next possession best): {H:.1f} of a team's own trips "
-      f"(95% range {H_LO:.1f} to {H_HI:.1f}). Used below.")
-if FORCED_H:
-    print(f"   --half-life given: using {FORCED_H:.1f} instead (range {FORCED_H * H_LO / H:.1f} to {FORCED_H * H_HI / H:.1f}).")
-    H, H_LO, H_HI = FORCED_H, FORCED_H * H_LO / H, FORCED_H * H_HI / H
+boot_rng = np.random.default_rng(1)          # own generator for the adjusted layers (keeps Parts B and C as before)
+diagnostic = []
+for k, (label, res, group, ok) in enumerate(LAYERS[:3]):
+    pg = per_game_sums(res, ok)
+    first_split = next(iter(SPLITS))
+    n_g = pg[first_split].shape[1]
+    draw = rng if k == 0 else boot_rng
+    boot = np.array([best(pg[first_split], np.bincount(draw.integers(0, n_g, n_g), minlength=n_g)) for _ in range(500)])
+    lo, hi = np.quantile(boot, [0.025, 0.975])
+    row = {"layer": label, f"best half-life, {first_split} (95% range)": f"{best(pg[first_split]):.1f} ({lo:.1f} to {hi:.1f})"}
+    row.update({name: f"{best(pg[name]):.1f}" for name in list(SPLITS)[1:]})
+    diagnostic.append(row)
+diagnostic = pd.DataFrame(diagnostic)
+print("\n   Can the data pin down the half-life?  The one whose momentum best predicts the next possession (grid 0.5 to 64):")
+print("   " + diagnostic.to_string(index=False).replace("\n", "\n   "))
+print("   On the raw rates the winner is the last possession: that is the possession chain, not momentum. With the chain")
+print("   removed the winner moves around from one group of seasons to the next, so the data do not pin it down.")
+print(f"   Used below: a reference half-life of {H:.1f} of a team's own trips; key numbers repeated at {H_LO:g} and {H_HI:g}.")
 
 # ====================================================== B. whose momentum matters?
 def two_slopes(res, ok):
@@ -369,6 +393,7 @@ own_raw, opp_raw = momentum_ahead(res_raw, H)
 own_adj, opp_adj = momentum_ahead(res_adj, H)
 ahead_raw, ahead_adj = own_raw - opp_raw, own_adj - opp_adj
 ahead_lin = np.subtract(*momentum_ahead(res_lin, H))
+ahead_lin_lo, ahead_lin_hi = (np.subtract(*momentum_ahead(res_lin, h)) for h in (H_LO, H_HI))   # sensitivity
 m_off, m_def = momentum_before(res_raw, H)
 
 row_of = pd.Series(pos, index=pd.MultiIndex.from_frame(poss[["game_id", "poss_num"]]))
@@ -441,6 +466,8 @@ for label, in_family, i, team in MOMENTS:
     for name, v in (("momentum ahead, raw", ahead_raw), ("chain removed", ahead_adj), ("chain + players removed", ahead_lin)):
         mean, se = mean_ci(v[j] * flip, gidx[i])
         row[name], row[name + " se"] = mean, se
+    for name, v in ((f"same at half-life {H_LO:g}", ahead_lin_lo), (f"same at half-life {H_HI:g}", ahead_lin_hi)):
+        row[name] = mean_ci(v[j] * flip, gidx[i])[0]
     for k, r in enumerate(trip_rates(i, team), 1):
         row[f"trip {k}"] = np.nanmean(r)
     results_d.append(row)
@@ -450,12 +477,13 @@ res_d["lo"], res_d["hi"] = res_d[col] - 1.96 * res_d[col + " se"], res_d[col] + 
 res_d["p"] = [erfc(abs(z) / sqrt(2)) for z in res_d[col] / res_d[col + " se"]]
 fam = res_d[res_d["family"]].sort_values("p")               # Holm correction across the highlight plays
 res_d["p_holm"] = pd.Series(np.minimum(np.maximum.accumulate(fam["p"].to_numpy() * (len(fam) - np.arange(len(fam)))), 1), index=fam.index)
-show = res_d[["play", "n", "momentum before", "momentum ahead, raw", "chain removed", col, "lo", "hi", "p_holm"] + [f"trip {k}" for k in range(1, 6)]]
+show = res_d[["play", "n", "momentum before", "momentum ahead, raw", "chain removed", col, "lo", "hi", "p_holm",
+              f"same at half-life {H_LO:g}", f"same at half-life {H_HI:g}"] + [f"trip {k}" for k in range(1, 6)]]
 print(show.to_string(index=False, na_rep="", formatters={
     "n": "{:,}".format, "p_holm": "{:.3f}".format,
     **{c: "{:+.1f}".format for c in show.columns if c not in ("play", "n", "p_holm")}}))
-print("   ('chain + players removed' also accounts for who was on the floor; lo/hi = its 95% range;")
-print("    trips 1-5 = that same rate on each of the team's next five trips)")
+print("   ('chain + players removed' also accounts for who was on the floor; lo/hi = its 95% range; 'same at half-life'")
+print("    = that column with a shorter / longer memory; trips 1-5 = that same rate on each of the team's next five trips)")
 
 # ====================================================== save for the other scripts
 con = sqlite3.connect(DB)
@@ -464,9 +492,8 @@ pd.DataFrame({"game_id": game, "poss_num": poss["poss_num"],
               "before_off": m_off, "before_def": m_def,                 # recent offense rate: team with ball / defending
               "ahead_own": own_raw, "ahead_opp": opp_raw,               # same, looking forward (raw)
               "ahead_adj": ahead_adj, "ahead_lineup": ahead_lin,        # net, chain removed / chain + players removed
-              # ... and at the two ends of the estimated half-life range, as a robustness check
-              "ahead_lineup_lo": np.subtract(*momentum_ahead(res_lin, H_LO)),
-              "ahead_lineup_hi": np.subtract(*momentum_ahead(res_lin, H_HI))}
+              # ... and the same at a shorter and a longer half-life (H_LO, H_HI), as a robustness check
+              "ahead_lineup_lo": ahead_lin_lo, "ahead_lineup_hi": ahead_lin_hi}
              ).to_sql("poss_momentum", con, if_exists="replace", index=False)
 con.execute("CREATE INDEX IF NOT EXISTS idx_pm ON poss_momentum(game_id, poss_num)")
 pd.DataFrame({"name": ["half_life", "half_life_lo", "half_life_hi"], "value": [H, H_LO, H_HI]}

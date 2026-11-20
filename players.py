@@ -90,7 +90,8 @@ try:
            ORDER BY p.game_id, p.poss_num""", con)
     effects = pd.read_sql_query("SELECT * FROM player_effects", con)
     names = pd.read_sql_query("SELECT * FROM players", con).drop_duplicates("player_id").set_index("player_id")["player"]
-    H = float(pd.read_sql_query("SELECT value FROM momentum_settings WHERE name = 'half_life'", con)["value"].iloc[0])
+    settings = pd.read_sql_query("SELECT * FROM momentum_settings", con).set_index("name")["value"]
+    H, H_LO, H_HI = (float(settings[k]) for k in ("half_life", "half_life_lo", "half_life_hi"))
 except Exception as e:
     raise SystemExit(f"Run build_lineups.py, expected.py and momentum.py first. [{e}]")
 ev = pd.read_sql_query(
@@ -391,9 +392,9 @@ def analyse(mask, label, with_overall):
                          season_average(creators, "value", "se"), repeats(creators, "value")))
     saved.append(present("STOPS (after) - after his baskets, counted more the more momentum was against his team",
                          season_average(stoppers, "value", "se"), repeats(stoppers, "value")))
-    for name, col in (("shorter", "ahead_lineup_lo"), ("longer", "ahead_lineup_hi")):
+    for h, col in ((H_LO, "ahead_lineup_lo"), (H_HI, "ahead_lineup_hi")):
         c_, s_ = after(col)
-        print(f"\n  Robustness - with the {name} end of the estimated half-life range:  creators repeat {repeats(c_, 'value')};")
+        print(f"\n  Robustness - with a half-life of {h:g} instead of {H:.1f}:  creators repeat {repeats(c_, 'value')};")
         print(f"      stoppers repeat {repeats(s_, 'value')}")
     return pd.concat(saved).assign(games=label)
 

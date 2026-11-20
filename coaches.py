@@ -9,7 +9,7 @@ calling it at that same moment, what happened next to
     - the other team's scoring rate,
     - and the difference between them (momentum)?
 All in points per 100 possessions, looking ahead with the nearest
-possessions counting most (half-life estimated in momentum.py). No "run of
+possessions counting most (the reference half-life set in momentum.py). No "run of
 6+", no fixed number of possessions.
 
 Which timeouts count: only those the coach chose. The league forces
@@ -115,7 +115,7 @@ is_forced = np.zeros(n, bool)
 called_by[tj[good]] = np.where(timeouts["home_txt"].notna(), 1, -1)[good]
 np.logical_or.at(is_forced, tj[good], forced[good])
 after_timeout = poss["starttype"].fillna("").to_numpy() == "Off Timeout"
-print(f"Half-life from momentum.py: {H:.1f}.  Unit: points per 100 possessions.")
+print(f"Reference half-life from momentum.py: {H:.1f}.  Unit: points per 100 possessions.")
 print(f"Timeouts in the data: {good.sum():,}; left out as forced TV slots: {forced[good].sum():,} "
       f"({forced[good].mean():.0%}); coach-chosen: {(~forced[good]).sum():,}")
 print("Only timeouts followed by the start of a new possession can be studied (about half of them);")
