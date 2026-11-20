@@ -30,10 +30,17 @@ swing. Nothing uses a hand-picked cut-off or a minimum number of games.
    and on defensive possessions he ends (steal, block, defensive rebound):
    how many points better than expected the possession went, per 100
    possessions he is on the floor. Misses and turnovers count against him.
-     CREATES     over all his possessions
-     STOPS       counted more the more momentum was against his team
-     LIFT        STOPS minus CREATES: does he do more than usual when
-                 momentum is against?
+     CREDIT      over all his possessions
+     CREDIT WHEN MOMENTUM IS AGAINST
+                 the same, counted more the more momentum was against his team
+     LIFT        the second minus the first: does he do more than usual when
+                 momentum is against? (compared with the average player's
+                 lift, because weighting by momentum lowers everyone's number)
+   The first two are INVOLVEMENT measures, not momentum measures: assists are
+   only recorded on made baskets, and steals, blocks and defensive rebounds
+   only on stops, so credit is positive by construction, and a player's
+   assist, defensive-rebound, steal and block rates explain about 85% of it.
+   Only LIFT, a comparison of a player with himself, is about momentum.
 
  VIEW 3 - WHAT HAPPENS AFTER HIS PLAYS
    His team's momentum from the next possession on (chain and players on
@@ -399,8 +406,10 @@ def analyse(mask, label, with_overall):
     v2["stops"], v2["stops_se"] = with_luck(against, ahead)
     v2["lift"], v2["lift_se"] = with_luck(against, ahead, minus=(one, one))
     v2 = v2.replace([np.inf, -np.inf], np.nan)
-    for col, title in (("creates", "CREATES (credit) - points better than expected on the possessions he is involved in"),
-                       ("stops", "STOPS (credit) - the same, counted more the more momentum was against his team"),
+    print("  The first two lists measure involvement (mostly assists, defensive rebounds, steals and blocks), not momentum;")
+    print("  only LIFT compares a player with himself.")
+    for col, title in (("creates", "CREDIT - points better than expected on the possessions he is credited on (involvement)"),
+                       ("stops", "CREDIT WHEN MOMENTUM IS AGAINST - the same, counted more the more momentum was against his team (involvement)"),
                        ("lift", "LIFT (credit) - does he do more than his usual when momentum is against his team?")):
         saved.append(present(title, season_average(v2, col, col + "_se"), repeats(v2, col)))
 
