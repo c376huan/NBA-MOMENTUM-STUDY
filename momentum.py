@@ -223,16 +223,92 @@ print("   (+0.02 = of a +10 momentum edge, +0.2 is still there on the next posse
 LAYERS = (("raw", res_raw, "quarter", everything), ("chain removed", res_adj, "quarter", everything),
           ("chain + players on the floor removed", res_lin, "quarter", has_lineup),
           ("chain removed, shuffled within same lineups", res_adj, "stint", everything))
-results_a, z_choose = [], {}
+results_a = []
 for label, res, group, ok in LAYERS:
     excess, z = versus_chance(carry_over, res, group, ok)
     excess, z = excess.reshape(len(HALF_LIVES), -1), z.reshape(len(HALF_LIVES), -1)
     for s, split in enumerate(SPLITS):
         results_a.append({"layer": label, "seasons": split,
                           **{f"half-life {h}": f"{excess[i, s]:+.3f} (z {z[i, s]:+.1f})" for i, h in enumerate(HALF_LIVES)}})
-    z_choose[label] = z[:, 0]
 results_a = pd.DataFrame(results_a)
 print(results_a.to_string(index=False))
+
+# The same numbers in plain units. A slope of 0.008 says little on its own; what matters is how many more points a
+# team scores on its next possession when it is one standard deviation (a typical amount) ahead on momentum, beyond
+# what chance gives - in points per 100 possessions. The 95% range comes from re-drawing whole games (bootstrap):
+# games are the unit because possessions in the same game are not independent. Each re-drawn set of games is used
+# for the real slope AND for the slope of the shuffled games together (a "paired" bootstrap), because the two move
+# together and only their difference is the result.
+size_rng = np.random.default_rng(2)                          # its own generator, so the other parts are unchanged
+SIZE_SHUFFLES = 20
+
+
+def own_shuffler(group):
+    order = np.argsort(group, kind="stable")
+    sorted_group = group[order].astype(float)
+
+    def draw():
+        new = np.empty(n, int)
+        new[order] = order[np.argsort(sorted_group + size_rng.random(n))]
+        return new
+    return draw
+
+
+def game_sums(res, ok, h):
+    """For each sample: per game, (count, sum M, sum r, sum M*r, sum M^2) with M = momentum before the possession."""
+    off, de = momentum_before(res, h)
+    m = off - de
+    out = {}
+    for split, mask in SPLITS.items():
+        k = mask & ok
+        out[split] = np.column_stack([np.bincount(gidx[k], weights=w, minlength=G)
+                                      for w in (np.ones(k.sum()), m[k], res[k], m[k] * res[k], m[k] ** 2)])
+    return out
+
+
+def slope_and_sd(t):
+    cnt, sx, sy, sxy, sxx = t
+    vxx = sxx - sx * sx / cnt
+    return (sxy - sx * sy / cnt) / vxx, np.sqrt(vxx / cnt)
+
+
+def size_in_points(res, group, ok):
+    """For every half-life and sample: (effect of a one-SD momentum edge, 95% low, 95% high), points per 100."""
+    real = {h: game_sums(res, ok, h) for h in HALF_LIVES}
+    shuffled = {h: {split: 0.0 for split in SPLITS} for h in HALF_LIVES}
+    draw = own_shuffler(GROUPS[group])
+    for _ in range(SIZE_SHUFFLES):                           # the average shuffled game, per game
+        order = draw()
+        for h in HALF_LIVES:
+            for split, sums in game_sums(res[order], ok[order], h).items():
+                shuffled[h][split] = shuffled[h][split] + sums / SIZE_SHUFFLES
+    out = {}
+    for split in SPLITS:
+        games = np.flatnonzero(real[HALF_LIVES[0]][split][:, 0] > 0)
+        weights = [np.bincount(size_rng.integers(0, len(games), len(games)), minlength=len(games))[:, None] for _ in range(500)]
+        for h in HALF_LIVES:
+            r_sums, s_sums = real[h][split][games], shuffled[h][split][games]
+            b, sd = slope_and_sd(r_sums.sum(0))
+            diff = b - slope_and_sd(s_sums.sum(0))[0]
+            boot = [slope_and_sd((r_sums * w).sum(0))[0] - slope_and_sd((s_sums * w).sum(0))[0] for w in weights]
+            lo, hi = np.quantile(boot, [0.025, 0.975])
+            out[(h, split)] = (diff * sd, lo * sd, hi * sd)
+    return out
+
+
+reg = ~playoffs
+home_edge = 100 * (points[reg & home].mean() - points[reg & ~home].mean())
+print("\n   The same, in points per 100 possessions: how many more a team scores on its next possession when it is one")
+print("   standard deviation ahead on momentum, beyond chance, with a 95% range from re-drawing whole games (paired with")
+print(f"   {SIZE_SHUFFLES} shuffled versions of each game).  For scale: home teams score {home_edge:+.1f} per 100 possessions more than away teams.\n")
+sizes = []
+for label, res, group, ok in LAYERS:
+    got = size_in_points(res, group, ok)
+    for split in SPLITS:
+        sizes.append({"layer": label, "seasons": split,
+                      **{f"half-life {h}": "{:+.2f} [{:+.2f}, {:+.2f}]".format(*got[(h, split)]) for h in HALF_LIVES}})
+sizes = pd.DataFrame(sizes)
+print(sizes.to_string(index=False))
 
 # Can the data tell us the half-life? For every half-life on a fine grid: how well does its momentum predict
 # the next possession (the correlation)? The best one in 2020-22, with a 95% range from re-drawing whole games
@@ -526,6 +602,7 @@ if DB == "data/nba.db":
     for old in ("momentum_effects.csv", "momentum_shuffle.csv", "chain_correlation_ladder.csv", "chain_during_run.csv"):
         Path("results", old).unlink(missing_ok=True)
     results_a.to_csv("results/momentum_carry_over.csv", index=False)
+    sizes.to_csv("results/momentum_carry_over_points.csv", index=False)
     results_b.to_csv("results/momentum_whose.csv", index=False)
     results_c.to_csv("results/momentum_streakiness.csv", index=False)
     res_d.drop(columns="family").to_csv("results/momentum_plays.csv", index=False, float_format="%.3f")
