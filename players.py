@@ -12,9 +12,10 @@ swing. Nothing uses a hand-picked cut-off or a minimum number of games.
    (ridge regression, the "regularized adjusted plus-minus" method; the
    amount of shrinkage is chosen by cross-validation, i.e. by what predicts
    games left out of the fit). A player gets:
-     STARTS IT   his effect on his team's scoring margin whenever he plays
-                 (offense plus defense). This is how momentum gets created
-                 from a standing start. One estimate per season.
+     OVERALL IMPACT  his effect on his team's scoring margin whenever he plays
+                 (offense plus defense): adjusted plus-minus. This is a
+                 player's QUALITY, not a momentum measure (earlier versions
+                 called it STARTS IT). One estimate per season.
      STOPS IT    how much MORE he helps when momentum is against his team,
                  split into scoring (his team's offense) and defense (the
                  opponent's offense), beyond his usual level when he plays.
@@ -386,7 +387,7 @@ def analyse(mask, label, with_overall):
         avg = season_average(effects, "net", "net_se")
         for c in ("off", "def"):
             avg[c] = effects.groupby("player_id")[c].mean()
-        saved.append(present("STARTS IT - effect on his team's scoring margin whenever he is on the floor", avg,
+        saved.append(present("OVERALL IMPACT - effect on his team's scoring margin whenever he is on the floor (adjusted plus-minus: quality, not momentum)", avg,
                              repeats(effects, "net", "net_se"), extra=("off", "def"), already_fair=True,
                              note="off = his team's offense, def = points the opponent scores (negative is good)"))
     inter, verdict, repeat_text, helps = interaction_model(np.flatnonzero(ok))
