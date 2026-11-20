@@ -22,12 +22,28 @@ How it is built, and why (nothing here is a hand-picked number):
    MUCH to shrink is not chosen by me: it is the amount that predicts best
    on games left out of the fit (5-fold cross-validation, by game).
 
- * Smooth curves, not bands. Score margin and clock enter through
-   restricted cubic splines (smooth curves) with knots at fixed percentiles
-   of the data (the standard 5-knot placement), plus a separate margin
-   curve for the 4th quarter/overtime, when big leads change who plays.
-   The clock uses a log scale so the last seconds of a period (heaves) can
-   bend sharply.
+ * Smooth curves for the ordinary run of play. Score margin and clock enter
+   through restricted cubic splines (smooth curves) with knots at fixed
+   percentiles of the data (the standard 5-knot placement), plus a separate
+   margin curve for the 4th quarter/overtime, when big leads change who
+   plays.
+
+ * Game states that the smooth curves miss. Checking where the expectation
+   went wrong showed four situations in which possessions are worth clearly
+   more or less than the curves say, and each lasts for a stretch of play,
+   so it could pass for momentum. They are added as their own terms, with
+   boundaries taken from the rules of the game, not from the results:
+     - the last seconds of a period (heaves, 2-for-1s): 0-5, 6-24 (the shot
+       clock is off) and 25-60 seconds left, in the 1st-3rd quarters;
+     - the end of the game (intentional fouls, playing for one shot): in the
+       last six minutes of the 4th quarter and overtime, the score margin
+       counted in possessions (tied; 1-3, 4-6, 7-9, 10+ ahead or behind)
+       crossed with the time left (0-24 s, 25-60 s, 1-2 min, 2-6 min);
+     - the defense in the foul penalty, so every further foul gives free
+       throws (from the team-foul counts written in the play-by-play, e.g.
+       "S.FOUL (P1.T4)" = that team's 4th foul of the period);
+     - days of rest for each team (back-to-back, two days or more, first
+       game of the season; one day off is the reference).
 
  * Cross-fitting. The expectation for a possession always comes from a model
    fitted WITHOUT that game's fold, so a team's hot night cannot leak into
@@ -85,12 +101,57 @@ def knots_of(x):
 
 
 margin = poss["start_margin"].to_numpy(float)                 # offense's lead at the start of the possession
-log_clock = np.log1p(poss["seconds_left"].to_numpy(float))
-late = (poss["period"] >= 4).to_numpy()
+clock = poss["seconds_left"].to_numpy(float)
+period = poss["period"].to_numpy()
+log_clock = np.log1p(clock)
+late = period >= 4
+
+
+def in_penalty():
+    """1 if the defense is already in the foul penalty when the possession starts, from the team-foul counts in the
+    play-by-play: "(P2.T4)" = the fouler's 2nd personal foul and his team's 4th of the period, "(P3.PN)" = a foul
+    committed while already in the penalty. A team is in the penalty after its 4th team foul of a quarter (3rd in
+    overtime), and in the last two minutes of a period after its first foul in those two minutes."""
+    f = pd.read_sql_query("""SELECT game_id, period, seconds_left, player1_team_abbreviation AS team,
+                                    COALESCE(homedescription, '') || ' ' || COALESCE(visitordescription, '') AS txt
+                             FROM events WHERE eventmsgtype = 6""", con)
+    note = f["txt"].str.extract(r"\(P\d+\.(?:T(\d+)|(PN))\)")
+    count = pd.to_numeric(note[0], errors="coerce").to_numpy()
+    limit = np.where(f["period"] <= 4, 4, 3)
+    into = (note[1] == "PN").to_numpy() | (count >= limit) | ((count >= 1) & (f["seconds_left"] <= 120).to_numpy())
+    went_in = f[into].groupby(["game_id", "period", "team"])["seconds_left"].max()     # clock when it began (counts down)
+    began = went_in.reindex(pd.MultiIndex.from_frame(poss[["game_id", "period", "defense"]])).to_numpy()
+    return began > clock                                                               # strictly before this possession
+
+
+def rest_days():
+    """Days since each team's previous game (regular season and playoffs in date order), for the offense and the
+    defense: back-to-back, 2+ days, first game of the season (1 day off = the reference)."""
+    g = poss.drop_duplicates("game_id")[["game_id", "season", "gamedate", "home", "away"]]
+    long = pd.concat([g.assign(team=g["home"]), g.assign(team=g["away"])])
+    long = long.assign(date=pd.to_datetime(long["gamedate"])).sort_values(["season", "team", "date", "game_id"])
+    days = long.groupby(["season", "team"])["date"].diff().dt.days
+    days.index = pd.MultiIndex.from_frame(long[["game_id", "team"]])
+    cols = []
+    for side in ("offense", "defense"):
+        d = days.reindex(pd.MultiIndex.from_frame(poss[["game_id", side]])).to_numpy()
+        cols += [d == 1, d >= 3, np.isnan(d)]
+    return np.column_stack(cols)
+
+
+# end of the game: margin in possessions x time left, in the last six minutes of the 4th quarter and overtime
+margin_bin = np.digitize(margin, [-9.5, -6.5, -3.5, -0.5, 0.5, 3.5, 6.5, 9.5])   # behind 10+, 7-9, 4-6, 1-3, tied, ahead 1-3 ...
+time_band = np.digitize(clock, [24.5, 60.5, 120.5])                            # 0-24 s, 25-60 s, 1-2 min, 2-6 min
+end_game = np.where(late & (clock <= 360), margin_bin * 4 + time_band, -1)
+# end of the 1st-3rd quarters: 0-5 s, 6-24 s, 25-60 s left
+end_quarter = np.where((period <= 3) & (clock <= 60), np.digitize(clock, [5.5, 24.5]), -1)
 situation = np.column_stack([
     np.ones(n), (poss["is_home"] == 1).to_numpy(), pd.get_dummies(np.minimum(poss["period"], 5)).to_numpy(float)[:, 1:],
     spline(margin, knots_of(margin)), spline(margin, knots_of(margin[late])) * late[:, None], late,
-    spline(log_clock, knots_of(log_clock))]).astype(float)
+    spline(log_clock, knots_of(log_clock)),
+    end_game[:, None] == np.arange(36), end_quarter[:, None] == np.arange(3), in_penalty(), rest_days()]).astype(float)
+print(f"game states: defense in the foul penalty for {situation[:, -7].mean():.1%} of possessions; "
+      f"last six minutes of the 4th quarter or overtime {(end_game >= 0).mean():.1%}")
 chain = pd.get_dummies(poss["starttype"].fillna("?")).to_numpy(float)[:, 1:]
 
 
