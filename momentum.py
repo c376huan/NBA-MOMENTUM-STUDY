@@ -55,7 +55,11 @@ Parts:
     simulated worlds draw from the whole game; shuffling within quarters
     instead made "left over" come out negative in a league with no momentum.)
  D. Plays. After a dunk, block, steal-and-score or and-one, the team's
-    momentum going forward and its rate on each of its next five trips.
+    momentum going forward and its rate on each of its next five trips,
+    compared with what follows an ordinary 2-point basket. (Every made basket
+    is followed by a little momentum, because a possession's own result and
+    the next few go together; the question is whether the highlight adds to
+    that.)
 
 Saves table `poss_momentum` (rates, momentum before and after every
 possession) for players.py and coaches.py.
@@ -510,7 +514,7 @@ tg_seq = team_game[past.order]
 
 
 def trip_rates(i, team, trips=5):
-    """Chain-removed net rate on each of the team's next trips after possession i."""
+    """Net rate (chain and players removed) on each of the team's next trips after possession i."""
     out = []
     side = (team == 1).astype(int)
     own_tg, opp_tg = gidx[i] * 2 + side, gidx[i] * 2 + (1 - side)
@@ -532,9 +536,20 @@ def mean_ci(x, groups):
     return mean, se
 
 
+def difference_ci(x1, g1, x2, g2):
+    """Mean of x1 minus mean of x2, with a standard error that treats games as the unit (the two sets of plays
+    come from the same games, so each game's contribution to both means is counted together)."""
+    k1, k2 = ~np.isnan(x1), ~np.isnan(x2)
+    s1, n1 = np.bincount(g1[k1], weights=x1[k1], minlength=G), np.bincount(g1[k1], minlength=G)
+    s2, n2 = np.bincount(g2[k2], weights=x2[k2], minlength=G), np.bincount(g2[k2], minlength=G)
+    m1, m2 = s1.sum() / n1.sum(), s2.sum() / n2.sum()
+    e = (s1 - m1 * n1) / n1.sum() - (s2 - m2 * n2) / n2.sum()
+    return m1 - m2, np.sqrt((e ** 2).sum())
+
+
 print(f"\n\nD. PLAYS - what the team's rate does afterwards (it = the team that made the play).")
 print(f"   'momentum ahead' = its recency-weighted net rate from the next possession on (half-life {H:.1f}).\n")
-results_d = []
+results_d, kept = [], {}
 for label, in_family, i, team in MOMENTS:
     team = sign[i] if team is None else team
     j = i + 1
@@ -550,19 +565,28 @@ for label, in_family, i, team in MOMENTS:
         row[name] = mean_ci(v[j] * flip, gidx[i])[0]
     for k, r in enumerate(trip_rates(i, team), 1):
         row[f"trip {k}"] = np.nanmean(r)
+    kept[label] = (ahead_lin[j] * flip, gidx[i])
     results_d.append(row)
 res_d = pd.DataFrame(results_d)
 col = "chain + players removed"
 res_d["lo"], res_d["hi"] = res_d[col] - 1.96 * res_d[col + " se"], res_d[col] + 1.96 * res_d[col + " se"]
-res_d["p"] = [erfc(abs(z) / sqrt(2)) for z in res_d[col] / res_d[col + " se"]]
-fam = res_d[res_d["family"]].sort_values("p")               # Holm correction across the highlight plays
+# the question that matters: does the highlight add anything to what follows an ordinary basket?
+base_x, base_g = kept["(ordinary 2-pt basket)"]
+diffs = [difference_ci(*kept[label], base_x, base_g) if fam_ else (np.nan, np.nan)
+         for label, fam_ in zip(res_d["play"], res_d["family"])]
+res_d["vs ordinary 2"], res_d["vs ordinary 2 se"] = [d[0] for d in diffs], [d[1] for d in diffs]
+res_d["p"] = [erfc(abs(d) / se / sqrt(2)) if se > 0 else np.nan for d, se in diffs]
+fam = res_d[res_d["family"]].sort_values("p")               # Holm correction across the four highlight plays
 res_d["p_holm"] = pd.Series(np.minimum(np.maximum.accumulate(fam["p"].to_numpy() * (len(fam) - np.arange(len(fam)))), 1), index=fam.index)
-show = res_d[["play", "n", "momentum before", "momentum ahead, raw", "chain removed", col, "lo", "hi", "p_holm",
+res_d["vs ordinary 2 (95%)"] = [f"{d:+.1f} [{d - 1.96 * se:+.1f}, {d + 1.96 * se:+.1f}]" if fam_ else ""
+                                for d, se, fam_ in zip(res_d["vs ordinary 2"], res_d["vs ordinary 2 se"], res_d["family"])]
+show = res_d[["play", "n", "momentum before", "momentum ahead, raw", "chain removed", col, "lo", "hi", "vs ordinary 2 (95%)", "p_holm",
               f"same at half-life {H_LO:g}", f"same at half-life {H_HI:g}"] + [f"trip {k}" for k in range(1, 6)]]
 print(show.to_string(index=False, na_rep="", formatters={
     "n": "{:,}".format, "p_holm": "{:.3f}".format,
-    **{c: "{:+.1f}".format for c in show.columns if c not in ("play", "n", "p_holm")}}))
-print("   ('chain + players removed' also accounts for who was on the floor; lo/hi = its 95% range; 'same at half-life'")
+    **{c: "{:+.1f}".format for c in show.columns if c not in ("play", "n", "p_holm", "vs ordinary 2 (95%)")}}))
+print("   ('chain + players removed' also accounts for who was on the floor; lo/hi = its 95% range; 'vs ordinary 2' = the")
+print("    same minus what follows an ordinary 2-point basket, with p_holm for that difference; 'same at half-life'")
 print("    = that column with a shorter / longer memory; trips 1-5 = that same rate on each of the team's next five trips)")
 
 # ====================================================== save for the other scripts
