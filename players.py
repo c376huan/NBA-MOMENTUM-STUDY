@@ -315,11 +315,21 @@ def interaction_model(r):
     repeat_text = (f"one half of the games against the other, {regular.sum():,} players with a fair amount of play in "
                    f"both: STOPS {rep_stops:+.2f}, KEEPS {rep_keeps:+.2f} (near 0 = luck)")
 
-    helps = errors[li] < nothing and li < len(LAMBDAS) - 1
+    # Is the improvement on left-out games bigger than its own noise? Picking the best of many shrinkage values
+    # always beats "no player differences" by some tiny amount, so the gain is measured game by game (games are the
+    # unit) and must be more than about twice its standard error.
+    gain = np.zeros(len(r))
+    for k in range(FOLDS):
+        rows_k = np.flatnonzero(fold == k)
+        beta_k = np.linalg.solve(A_all - parts[k][0] + lam * eye, b_all - parts[k][1])
+        gain[rows_k] = y2[rows_k] ** 2 - (y2[rows_k] - (beta_k[cols[rows_k]] * vals[rows_k]).sum(axis=1)) ** 2
+    per_game = np.bincount(pd.factorize(game[r])[0], weights=gain)
+    z_gain = per_game.mean() / (per_game.std(ddof=1) / np.sqrt(len(per_game)))
+    helps = li < len(LAMBDAS) - 1 and z_gain > 1.96
     verdict = (f"yes - beyond how good each player is, knowing who is on the floor improves the prediction of games "
-               f"left out of the fit (shrinkage chosen: {lam:,.0f})" if helps else
-               "no - beyond how good each player is, knowing who is on the floor does not improve the prediction of "
-               "games left out of the fit, so the data cannot tell players apart on this")
+               f"left out of the fit by more than chance (gain z = {z_gain:+.1f}; shrinkage chosen: {lam:,.0f})" if helps else
+               f"no - beyond how good each player is, knowing who is on the floor does not improve the prediction of "
+               f"games left out of the fit by more than chance (gain z = {z_gain:+.1f}), so the data cannot tell players apart on this")
     return out, verdict, repeat_text, helps
 
 
