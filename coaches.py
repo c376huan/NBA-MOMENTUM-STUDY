@@ -41,8 +41,11 @@ measured).
     impact on momentum   = the first minus the second.  + = GOOD, - = BAD
 "+/-" is the 95% margin of error; "fair estimate" pulls each coach toward
 the average according to how much of the spread between coaches is luck;
-the verdict says whether his impact is clearly positive, clearly negative,
-or can't be told from zero. "Repeats?" checks one season against the next.
+the verdict says whether his impact is clearly better or worse than the
+AVERAGE coach's, or can't be told from it (not "from zero": the league-wide
+effect of a timeout is itself not zero, and testing each coach against zero
+would flag coaches for that league-wide effect rather than for anything of
+their own). "Repeats?" checks one season against the next.
 
 Usage:
     python coaches.py [--db data/fake_nba.db]
@@ -261,7 +264,7 @@ def fair(value, se):
     w = 1 / se ** 2
     centre = np.sum(w * value) / np.sum(w)
     real_var = max(np.sum(w * (value - centre) ** 2) / np.sum(w) - np.sum(w * se ** 2) / np.sum(w), 0.0)
-    return centre + real_var / (real_var + se ** 2) * (value - centre), np.sqrt(real_var)
+    return centre + real_var / (real_var + se ** 2) * (value - centre), np.sqrt(real_var), centre
 
 
 # each team's own possessions in order, to look up "its k-th trip from this stoppage on"
@@ -381,16 +384,17 @@ def report(scope, label):
         w = 1 / cs[c + "_se"] ** 2
         gw = cs.assign(w=w, vw=cs[c] * w).groupby("coach")
         board[c], board[c + "_pm"] = gw["vw"].sum() / gw["w"].sum(), 1.96 / np.sqrt(gw["w"].sum())
-    board["fair"], real_sd = fair(board["net"].to_numpy(), board["net_pm"].to_numpy() / 1.96)
-    board["verdict"] = np.select([board["net"] - board["net_pm"] > 0, board["net"] + board["net_pm"] < 0],
-                                 ["clearly positive", "clearly negative"], "can't tell from zero")
-    board["evidence"] = board["net"] / board["net_pm"]          # how strong the evidence is, for ordering ties
+    board["fair"], real_sd, centre = fair(board["net"].to_numpy(), board["net_pm"].to_numpy() / 1.96)
+    gap = board["net"] - centre                                # each coach against the average coach
+    board["verdict"] = np.select([gap - board["net_pm"] > 0, gap + board["net_pm"] < 0],
+                                 ["clearly better than average", "clearly worse than average"], "can't tell from average")
+    board["evidence"] = gap / board["net_pm"]                  # how strong the evidence is, for ordering ties
     board = board.sort_values(["fair", "evidence"], ascending=False)
-    flagged = (board["verdict"] != "can't tell from zero").sum()
+    flagged = (board["verdict"] != "can't tell from average").sum()
     print(f"\n   {len(board)} coaches. Each number is the average of his seasons. Ranked by the fair estimate")
     print("   (when the fair estimates are all equal - no real spread - by how strong the evidence is).")
-    print(f"   Real spread between coaches: {real_sd:.2f}.  Clearly positive or negative: {flagged} "
-          f"(luck alone would flag about {0.05 * len(board):.0f}).\n")
+    print(f"   Average coach: {centre:+.2f}.  Real spread between coaches: {real_sd:.2f}.  Clearly better or worse than the "
+          f"average coach: {flagged} (luck alone would flag about {0.05 * len(board):.0f}).\n")
     show = board.reset_index()[["coach", "seasons", "timeouts", "when", "own", "own_pm", "opp", "opp_pm", "net", "net_pm", "fair", "verdict", "adj"]]
     show.columns = ["coach", "seasons", "timeouts", "momentum when he calls it", "effect on his team", "+/-", "effect on opponent", "+/- ",
                     "impact on momentum", "+/-  ", "fair estimate", "verdict", "impact, chain+players removed"]

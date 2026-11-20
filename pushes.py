@@ -756,7 +756,7 @@ for SCOPE, label in ((False, "REGULAR SEASON"), (True, "PLAYOFFS")):
             print(f"  Repeats?  {lab:42s} {r:+.2f} over {len(pairs)} pairs of seasons ({verdict})")
     g = cs.groupby("coach")
     board = pd.DataFrame({"seasons": g.size(), "timeouts": g["timeouts"].sum(), "push strength when he calls it": g["strength"].mean()})
-    spread = {}
+    spread, centres = {}, {}
     for short, _, good_sign in MEASURES:
         wt = 1 / cs[short + "_se"] ** 2
         gw = cs.assign(wt=wt, vw=cs[short] * wt).groupby("coach")
@@ -764,17 +764,22 @@ for SCOPE, label in ((False, "REGULAR SEASON"), (True, "PLAYOFFS")):
         w_ = 1 / board[short + "_se"] ** 2
         centre = np.average(board[short], weights=w_)
         real_var = max(np.average((board[short] - centre) ** 2, weights=w_) - np.average(board[short + "_se"] ** 2, weights=w_), 0.0)
-        spread[short] = np.sqrt(real_var)
+        spread[short], centres[short] = np.sqrt(real_var), centre
         board[short + "_fair"] = centre + real_var / (real_var + board[short + "_se"] ** 2) * (board[short] - centre)
-        z = good_sign * board[short] / board[short + "_se"]
-        board[short + "_verdict"] = np.select([z > 1.96, z < -1.96], ["clearly helps", "clearly hurts"], "can't tell")
+        # each coach against the AVERAGE coach: the league-wide effect is not zero, so testing against zero would flag
+        # coaches for the league-wide effect rather than for anything of their own
+        z = good_sign * (board[short] - centre) / board[short + "_se"]
+        board[short + "_verdict"] = np.select([z > 1.96, z < -1.96], ["clearly better than average", "clearly worse than average"],
+                                              "can't tell")
         board[short + "_pm"] = 1.96 * board[short + "_se"]
-    board["evidence"] = board["mom"] / board["mom_se"]
+    board["evidence"] = (board["mom"] - centres["mom"]) / board["mom_se"]
     board = board.sort_values(["mom_fair", "evidence"], ascending=False)
     flagged = {short: (board[short + "_verdict"] != "can't tell").sum() for short, _, _ in MEASURES}
     print(f"  {len(board)} coaches, ranked by the fair estimate of 'momentum after' (the more sensitive of the two measures).")
     print(f"  Real spread between coaches: rest of push {spread['cut']:.2f} points, momentum after {spread['mom']:.2f}. "
-          f"Clearly helps or hurts: {flagged['cut']} and {flagged['mom']} coaches (luck alone would flag about {0.05 * len(board):.0f}).")
+          f"Average coach: rest of push {centres['cut']:+.2f}, momentum after {centres['mom']:+.1f}.")
+    print(f"  Clearly better or worse than the average coach: {flagged['cut']} on rest of push, {flagged['mom']} on momentum after "
+          f"(luck alone would flag about {0.05 * len(board):.0f} on each).")
     show = board.reset_index()[["coach", "seasons", "timeouts", "push strength when he calls it", "cut", "cut_pm", "cut_verdict",
                                 "mom", "mom_pm", "mom_fair", "mom_verdict"]]
     show.columns = ["coach", "seasons", "timeouts", "push strength when he calls it", "rest of push", "+/-", "verdict",
