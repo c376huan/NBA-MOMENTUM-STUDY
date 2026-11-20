@@ -17,10 +17,11 @@ swing. Nothing uses a hand-picked cut-off or a minimum number of games.
                  from a standing start. One estimate per season.
      STOPS IT    how much MORE he helps when momentum is against his team,
                  split into scoring (his team's offense) and defense (the
-                 opponent's offense).
+                 opponent's offense), beyond his usual level when he plays.
      KEEPS IT    how much MORE he helps when his team already has momentum.
                  STOPS and KEEPS are one estimate per player from all his
-                 seasons together (a single season is too little data).
+                 seasons together (a single season is too little data). His
+                 usual level is taken out first (see interaction_model).
    Small samples are pulled toward zero automatically, so no minimum is
    needed, and the estimates are already "fair".
 
@@ -157,8 +158,9 @@ def season_average(table, col, se_col):
     return pd.DataFrame({"seasons": g.size(), "value": g["vw"].sum() / g["w"].sum(), "se": 1 / np.sqrt(g["w"].sum())})
 
 
-def present(title, avg, repeat_text, extra=(), note="", already_fair=False):
-    """Print one ranked list. avg: one row per player with value and se."""
+def present(title, avg, repeat_text, extra=(), note="", already_fair=False, nobody=False):
+    """Print one ranked list. avg: one row per player with value and se. nobody=True: the data cannot tell players
+    apart on this measure, so nobody is flagged and the order means nothing."""
     avg = avg.copy()
     if already_fair:                       # ridge estimates are already pulled toward the average player (zero)
         avg["fair estimate"], centre, spread_text = avg["value"], 0.0, ""
@@ -167,6 +169,8 @@ def present(title, avg, repeat_text, extra=(), note="", already_fair=False):
         spread_text = f" league average {centre:+.2f}; real spread between players {real_sd:.2f};"
     z = (avg["value"] - centre) / avg["se"]
     avg["verdict"] = np.select([z > 1.96, z < -1.96], ["clearly above average", "clearly below average"], "can't tell from average")
+    if nobody:
+        avg["verdict"] = "can't tell from average"
     avg["player"] = names.reindex(avg.index).to_numpy()
     avg["+/-"] = 1.96 * avg["se"]
     avg["evidence"] = z                    # when fair estimates tie (no real spread), order by strength of evidence
@@ -176,6 +180,8 @@ def present(title, avg, repeat_text, extra=(), note="", already_fair=False):
     if note:
         print(f"  {note}")
     print(f"  Repeats?  {repeat_text}")
+    if nobody:
+        print("  The data cannot tell players apart on this (see above), so nobody is flagged and the order below means nothing.")
     print(f"  {len(avg):,} players;{spread_text} clearly above average: {above}, clearly below: {below}"
           + ("" if already_fair else f" (luck alone would flag about {0.025 * len(avg):.0f} each way)"))
     cols = ["player", "seasons", *extra, "value", "+/-", "fair estimate", "verdict"]
@@ -187,68 +193,127 @@ def present(title, avg, repeat_text, extra=(), note="", already_fair=False):
     return avg.reset_index().rename(columns={"index": "player_id"}).assign(measure=title.split(" - ")[0])[["measure", "player_id", *cols]]
 
 
-def interaction_model(r):
-    """VIEW 1, STOPS and KEEPS. One ridge regression over all the rows r: what is left of each possession
-    after the chain and the players' usual effects, explained by which players are on the floor TIMES how
-    much momentum is against (or for) their team. Four numbers per player: offense/against, offense/for,
-    defense/against, defense/for. Shrinkage chosen by 5-fold cross-validation over games."""
-    ids = np.unique(np.r_[off_players[r].ravel(), def_players[r].ravel()])
-    number = pd.Series(np.arange(len(ids)), index=ids)
-    o = number.reindex(off_players[r].ravel()).to_numpy().reshape(-1, 5)
-    d = number.reindex(def_players[r].ravel()).to_numpy().reshape(-1, 5)
-    a, f = against[r], ahead[r]
-    is_against = (a > 0)[:, None]
-    cols = np.column_stack([o * 4 + np.where(is_against, 0, 1), d * 4 + np.where(is_against, 3, 2)])
-    val = a + f                                             # the same for all ten players of a possession
-    C = np.column_stack([np.ones(len(r)), a, f])            # league-wide effect of momentum: taken out first
-    y = rate_lineup[r]
-    y = y - C @ np.linalg.lstsq(C, y, rcond=None)[0]
-    m = 4 * len(ids)
-    fold = pd.factorize(game[r])[0] % FOLDS
+def ridge_stats(cols, vals, y, rows, m):
+    """X'X and X'y for the given rows without building the (huge, mostly empty) design matrix X.
+    cols[i, s] = the column that slot s of row i fills, vals[i, s] = the value it puts there."""
+    c_, v_, y_ = cols[rows], vals[rows], y[rows]
+    upper, diag, b = np.zeros(m * m), np.zeros(m), np.zeros(m)
+    for s1 in range(c_.shape[1]):
+        diag += np.bincount(c_[:, s1], weights=v_[:, s1] ** 2, minlength=m)
+        b += np.bincount(c_[:, s1], weights=v_[:, s1] * y_, minlength=m)
+        for s2 in range(s1 + 1, c_.shape[1]):
+            upper += np.bincount(c_[:, s1] * m + c_[:, s2], weights=v_[:, s1] * v_[:, s2], minlength=m * m)
+    A = upper.reshape(m, m)
+    A = A + A.T
+    A[np.diag_indices(m)] += diag
+    return A, b
 
-    def stats(k):
-        c_, v_, y_ = cols[k], val[k], y[k]
-        v2 = v_ * v_
-        upper, diag, b = np.zeros(m * m), np.zeros(m), np.zeros(m)
-        for s1 in range(10):
-            diag += np.bincount(c_[:, s1], weights=v2, minlength=m)
-            b += np.bincount(c_[:, s1], weights=v_ * y_, minlength=m)
-            for s2 in range(s1 + 1, 10):
-                upper += np.bincount(c_[:, s1] * m + c_[:, s2], weights=v2, minlength=m * m)
-        A = upper.reshape(m, m)
-        A = A + A.T
-        A[np.diag_indices(m)] += diag
-        return A, b
 
-    parts = [stats(np.flatnonzero(fold == k)) for k in range(FOLDS)]
+def ridge_cv(cols, vals, y, fold, m, lambdas):
+    """Ridge fits on 4 folds, judged on the 5th, for every candidate shrinkage. Returns the per-fold X'X and X'y,
+    their totals, the held-out error for each shrinkage, and the held-out error of predicting 0."""
+    parts = [ridge_stats(cols, vals, y, np.flatnonzero(fold == k), m) for k in range(FOLDS)]
     A_all, b_all = sum(p[0] for p in parts), sum(p[1] for p in parts)
     eye = np.eye(m)
-    errors, nothing = np.zeros(len(LAMBDAS)), 0.0
+    errors, nothing = np.zeros(len(lambdas)), 0.0
     for k in range(FOLDS):
         A_train, b_train = A_all - parts[k][0], b_all - parts[k][1]
         rows_k = np.flatnonzero(fold == k)
-        nothing += (y[rows_k] ** 2).sum()                   # error of assuming no player differences at all
-        for li, lam in enumerate(LAMBDAS):
+        nothing += (y[rows_k] ** 2).sum()
+        for li, lam in enumerate(lambdas):
             beta = np.linalg.solve(A_train + lam * eye, b_train)
-            errors[li] += ((y[rows_k] - beta[cols[rows_k]].sum(axis=1) * val[rows_k]) ** 2).sum()
+            errors[li] += ((y[rows_k] - (beta[cols[rows_k]] * vals[rows_k]).sum(axis=1)) ** 2).sum()
+    return parts, A_all, b_all, errors, nothing
+
+
+def interaction_model(r):
+    """VIEW 1, STOPS and KEEPS. What is left of each possession after the chain and the players' usual effects,
+    explained by which players are on the floor TIMES how much momentum is against (or for) their team. Four
+    numbers per player: offense/against, offense/for, defense/against, defense/for.
+
+    Two steps, because the expected-points model shrinks every player's usual effect toward zero: a good
+    player's possessions therefore still come out a little above expectation whenever he plays, and a
+    momentum term alone would pick that up and call it "helps when momentum is against" (the first version
+    did: its lists were mostly the plus-minus ranking again).
+      1. Each player's left-over level when he is on the floor (offense and defense), fitted by ridge with the
+         shrinkage chosen by cross-validation, cross-fitted by game fold, and taken out of every possession.
+      2. The momentum terms on what is left, shrinkage chosen by cross-validation over games. "Players differ"
+         only if this predicts games left out of the fit better than step 1 alone.
+    Uncertainty: the sampling spread of the shrunk estimates (sigma^2 M X'X M, M = (X'X + lambda I)^-1), not the
+    width of the shrinkage itself. A split of the games into two halves checks whether the numbers repeat."""
+    ids = np.unique(np.r_[off_players[r].ravel(), def_players[r].ravel()])
+    P = len(ids)
+    number = pd.Series(np.arange(P), index=ids)
+    o = number.reindex(off_players[r].ravel()).to_numpy().reshape(-1, 5)
+    d = number.reindex(def_players[r].ravel()).to_numpy().reshape(-1, 5)
+    a, f = against[r], ahead[r]
+    C = np.column_stack([np.ones(len(r)), a, f])            # league-wide effect of momentum: taken out first
+    y = rate_lineup[r]
+    y = y - C @ np.linalg.lstsq(C, y, rcond=None)[0]
+    fold = pd.factorize(game[r])[0] % FOLDS
+
+    # step 1: each player's left-over level, cross-fitted
+    cols1, vals1 = np.column_stack([o * 2, d * 2 + 1]), np.ones((len(r), 10))
+    parts1, A1, b1, err1, zero1 = ridge_cv(cols1, vals1, y, fold, 2 * P, LAMBDAS)
+    lam1 = LAMBDAS[int(np.argmin(err1))]
+    level = np.zeros(len(r))
+    for k in range(FOLDS):
+        rows_k = np.flatnonzero(fold == k)
+        beta1 = np.linalg.solve(A1 - parts1[k][0] + lam1 * np.eye(2 * P), b1 - parts1[k][1])
+        level[rows_k] = beta1[cols1[rows_k]].sum(axis=1)
+    y2 = y - level
+
+    # step 2: the momentum terms
+    is_against = (a > 0)[:, None]
+    cols = np.column_stack([o * 4 + np.where(is_against, 0, 1), d * 4 + np.where(is_against, 3, 2)])
+    vals = np.repeat((a + f)[:, None], 10, axis=1)          # the same for all ten players of a possession
+    m = 4 * P
+    parts, A_all, b_all, errors, nothing = ridge_cv(cols, vals, y2, fold, m, LAMBDAS)
     li = int(np.argmin(errors))
     lam = LAMBDAS[li]
+    eye = np.eye(m)
     M = np.linalg.inv(A_all + lam * eye)
     beta = M @ b_all
-    sigma2 = ((y - beta[cols].sum(axis=1) * val) ** 2).mean()
-    k4 = np.arange(len(ids)) * 4
-    var = np.diag(M) * sigma2
+    sigma2 = ((y2 - (beta[cols] * vals).sum(axis=1)) ** 2).mean()
+    k4 = np.arange(P) * 4
+
+    def contrast(i, j):
+        """Sampling variance of beta_i - beta_j: sigma^2 x (M X'X M) = sigma^2 x (M - lambda M M)."""
+        Mi, Mj = M[i], M[j]
+        cov = lambda u, v, Mu, Mv: M[u, v] - lam * (Mu * Mv).sum(axis=1)
+        return sigma2 * (cov(i, i, Mi, Mi) + cov(j, j, Mj, Mj) - 2 * cov(i, j, Mi, Mj))
+
     out = pd.DataFrame({
         "stop_scoring": beta[k4], "stop_defense": -beta[k4 + 2],
-        "stops": beta[k4] - beta[k4 + 2], "stops_se": np.sqrt(var[k4] + var[k4 + 2] - 2 * sigma2 * M[k4, k4 + 2]),
-        "keeps": beta[k4 + 1] - beta[k4 + 3], "keeps_se": np.sqrt(var[k4 + 1] + var[k4 + 3] - 2 * sigma2 * M[k4 + 1, k4 + 3])},
+        "stops": beta[k4] - beta[k4 + 2], "stops_se": np.sqrt(contrast(k4, k4 + 2)),
+        "keeps": beta[k4 + 1] - beta[k4 + 3], "keeps_se": np.sqrt(contrast(k4 + 1, k4 + 3))},
         index=pd.Index(ids, name="player_id"))
+
+    # do the numbers repeat? both steps fitted again, separately, on two halves of the games (folds 0, 2, 4
+    # against folds 1, 3), so that nothing from one half leaks into the other
+    halves = []
+    for ks in ((0, 2, 4), (1, 3)):
+        rows_h = np.flatnonzero(np.isin(fold, ks))
+        A1_h, b1_h = sum(parts1[k][0] for k in ks), sum(parts1[k][1] for k in ks)
+        level_h = np.linalg.solve(A1_h + lam1 * np.eye(2 * P), b1_h)[cols1].sum(axis=1)
+        A_h, b_h = ridge_stats(cols, vals, y - level_h, rows_h, m)
+        bh = np.linalg.solve(A_h + lam * eye, b_h)
+        seen = np.bincount(np.r_[o[rows_h].ravel(), d[rows_h].ravel()], minlength=P)
+        halves.append((bh[k4] - bh[k4 + 2], bh[k4 + 1] - bh[k4 + 3], seen))
+    del parts1, A1
+    both = np.minimum(halves[0][2], halves[1][2])
+    regular = both >= np.median(both[both > 0])             # players with a fair amount of play in both halves
+    rep_stops = np.corrcoef(halves[0][0][regular], halves[1][0][regular])[0, 1]
+    rep_keeps = np.corrcoef(halves[0][1][regular], halves[1][1][regular])[0, 1]
+    repeat_text = (f"one half of the games against the other, {regular.sum():,} players with a fair amount of play in "
+                   f"both: STOPS {rep_stops:+.2f}, KEEPS {rep_keeps:+.2f} (near 0 = luck)")
+
     helps = errors[li] < nothing and li < len(LAMBDAS) - 1
-    verdict = (f"yes - knowing who is on the floor improves the prediction of games left out of the fit "
-               f"(shrinkage chosen: {lam:,.0f})" if helps else
-               "no - knowing who is on the floor does not improve the prediction of games left out of the fit, "
-               "so the data cannot tell players apart on this")
-    return out, verdict
+    verdict = (f"yes - beyond how good each player is, knowing who is on the floor improves the prediction of games "
+               f"left out of the fit (shrinkage chosen: {lam:,.0f})" if helps else
+               "no - beyond how good each player is, knowing who is on the floor does not improve the prediction of "
+               "games left out of the fit, so the data cannot tell players apart on this")
+    return out, verdict, repeat_text, helps
 
 
 # ============================================================== the three views, for one set of games
@@ -274,15 +339,17 @@ def analyse(mask, label, with_overall):
         saved.append(present("STARTS IT - effect on his team's scoring margin whenever he is on the floor", avg,
                              repeats(effects, "net"), extra=("off", "def"), already_fair=True,
                              note="off = his team's offense, def = points the opponent scores (negative is good)"))
-    inter, verdict = interaction_model(np.flatnonzero(ok))
+    inter, verdict, repeat_text, helps = interaction_model(np.flatnonzero(ok))
     inter["seasons"] = seasons_played.reindex(inter.index).fillna(0).astype(int)
     print(f"\n  Do players differ in how they respond to momentum?  {verdict}.")
     saved.append(present("STOPS IT - extra help when momentum is against his team (per typical swing)",
-                         inter.rename(columns={"stops": "value", "stops_se": "se"}), "see the line above",
-                         extra=("stop_scoring", "stop_defense"), already_fair=True,
-                         note="stop_scoring = his team's offense; stop_defense = points kept off the opponent"))
+                         inter.rename(columns={"stops": "value", "stops_se": "se"}), repeat_text,
+                         extra=("stop_scoring", "stop_defense"), already_fair=True, nobody=not helps,
+                         note="stop_scoring = his team's offense; stop_defense = points kept off the opponent; "
+                              "beyond his usual level when he plays; values are shrunk toward 0"))
     saved.append(present("KEEPS IT - extra help when his team already has momentum (per typical swing)",
-                         inter.rename(columns={"keeps": "value", "keeps_se": "se"}), "see the line above", already_fair=True))
+                         inter.rename(columns={"keeps": "value", "keeps_se": "se"}), repeat_text, already_fair=True, nobody=not helps,
+                         note="beyond his usual level when he plays; values are shrunk toward 0"))
 
     # ---------------------------------------------------------------- VIEW 2
     print("\n" + "=" * 100 + "\nVIEW 2 - CREDIT FOR THE PLAYS (per 100 possessions on the floor)\n" + "=" * 100)
