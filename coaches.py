@@ -89,6 +89,29 @@ def would_be_start(con, poss):
     return np.r_[6, end_cls[:-1]]                       # the possession before (never used for the first of a period)
 
 
+def repeat_words(r, luck):
+    """Plain words for a season-to-season correlation r. 'Luck' = the same correlation with the seasons paired at
+    random; only an r above 95% of those counts as repeating at all, and its size is then described with the usual
+    conventions for correlations (0.1 small, 0.3 medium, 0.5 large): a tiny r can pass the test with this much data
+    and still say almost nothing about next season."""
+    if r <= np.quantile(luck, 0.95):
+        return "no - looks like luck"
+    return "repeats " + ("strongly" if r >= 0.5 else "moderately" if r >= 0.3 else "weakly" if r >= 0.1 else "barely")
+
+
+def shuffled(a, b, corr, k=1000):
+    """The same correlation with the seasons paired at random, k times. Its own generator, so the answer never
+    depends on what ran before."""
+    g = np.random.default_rng(7)
+    return np.array([corr(a, g.permutation(b)) for _ in range(k)])
+
+
+def r_range(r, n):
+    """95% range of a correlation from n pairs (Fisher's z)."""
+    lo, hi = np.tanh(np.arctanh(r) + np.array([-1.96, 1.96]) / np.sqrt(max(n - 3, 1)))
+    return f"[95%: {lo:+.2f} to {hi:+.2f}]"
+
+
 # ============================================================== load data
 con = sqlite3.connect(DB)
 # make the database use the real (game, possession) indexes when joining tables; left to itself it
@@ -371,9 +394,8 @@ def report(scope, label):
                          ("adj", "impact on momentum, chain and players removed")):
             a_, b2 = pairs[col].to_numpy(), pairs[f"{col}_next"].to_numpy()
             r = np.corrcoef(a_, b2)[0, 1]
-            luck = np.array([np.corrcoef(a_, rng.permutation(b2))[0, 1] for _ in range(5000)])
-            verdict = "a lasting trait" if r > np.quantile(luck, 0.99) else "weak hint" if r > np.quantile(luck, 0.95) else "no - looks like luck"
-            print(f"   {lab:52s} {r:+.2f}  ({verdict})")
+            verdict = repeat_words(r, shuffled(a_, b2, lambda u, v: np.corrcoef(u, v)[0, 1], 5000))
+            print(f"   {lab:52s} {r:+.2f} {r_range(r, len(pairs))}  ({verdict})")
     else:
         print("   not enough seasons to say")
 

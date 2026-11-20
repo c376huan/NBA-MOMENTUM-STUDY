@@ -143,17 +143,36 @@ def fair(value, se):
     return centre + real_var / (real_var + se ** 2) * (value - centre), centre, np.sqrt(real_var)
 
 
-def repeats(table, col):
-    """Correlation between a player's number in one season and his next season."""
-    t = table[["player_id", "season", col]].dropna()
+def repeat_words(r, luck):
+    """Plain words for a season-to-season correlation r. 'Luck' = the same correlation with the seasons paired at
+    random; only an r above 95% of those counts as repeating at all, and its size is then described with the usual
+    conventions for correlations (0.1 small, 0.3 medium, 0.5 large). A tiny r can be 'real' with this much data and
+    still say almost nothing about next season, so the size matters as much as passing the test."""
+    if r <= np.quantile(luck, 0.95):
+        return "no - looks like luck"
+    return "repeats " + ("strongly" if r >= 0.5 else "moderately" if r >= 0.3 else "weakly" if r >= 0.1 else "barely")
+
+
+def repeats(table, col, se_col=None):
+    """Correlation between a player's number in one season and his next season, with a 95% range, and (when
+    standard errors are given) the same with each pair weighted by how precisely both seasons are measured -
+    seasons of a few possessions are mostly noise and pull the plain correlation toward zero."""
+    t = table[["player_id", "season", col] + ([se_col] if se_col else [])].dropna()
     pairs = t.merge(t.assign(season=t["season"] - 1), on=["player_id", "season"], suffixes=("", "_next"))
     if len(pairs) < 30:
         return "not enough seasons to say"
     a, b = pairs[col].to_numpy(), pairs[f"{col}_next"].to_numpy()
     r = np.corrcoef(a, b)[0, 1]
-    luck = np.array([np.corrcoef(a, rng.permutation(b))[0, 1] for _ in range(2000)])
-    verdict = "a lasting trait" if r > np.quantile(luck, 0.99) else "weak hint" if r > np.quantile(luck, 0.95) else "no - looks like luck"
-    return f"{r:+.2f} over {len(pairs):,} pairs of seasons ({verdict})"
+    shuffle = np.random.default_rng(7)                       # its own generator: the answer must not depend on what ran before
+    luck = np.array([np.corrcoef(a, shuffle.permutation(b))[0, 1] for _ in range(2000)])
+    lo, hi = np.tanh(np.arctanh(r) + np.array([-1.96, 1.96]) / np.sqrt(len(pairs) - 3))
+    text = f"{r:+.2f} [95%: {lo:+.2f} to {hi:+.2f}] over {len(pairs):,} pairs of seasons ({repeat_words(r, luck)})"
+    if se_col:
+        w = 1 / (pairs[se_col].to_numpy() ** 2 + pairs[f"{se_col}_next"].to_numpy() ** 2)
+        ok = np.isfinite(w)
+        cov = np.cov(a[ok], b[ok], aweights=w[ok])
+        text += f"; weighted by precision {cov[0, 1] / np.sqrt(cov[0, 0] * cov[1, 1]):+.2f}"
+    return text
 
 
 def season_average(table, col, se_col):
@@ -170,10 +189,13 @@ def present(title, avg, repeat_text, extra=(), note="", already_fair=False, nobo
     apart on this measure, so nobody is flagged and the order means nothing."""
     avg = avg.copy()
     if already_fair:                       # ridge estimates are already pulled toward the average player (zero)
-        avg["fair estimate"], centre, spread_text = avg["value"], 0.0, ""
+        avg["fair estimate"], centre, spread_text, real_sd = avg["value"], 0.0, "", np.nan
+        post_sd = avg["se"].to_numpy()
     else:
         avg["fair estimate"], centre, real_sd = fair(avg["value"].to_numpy(), avg["se"].to_numpy())
         spread_text = f" league average {centre:+.2f}; real spread between players {real_sd:.2f};"
+        se2 = avg["se"].to_numpy() ** 2                      # how sure the fair estimate is (normal-normal model)
+        post_sd = np.sqrt(real_sd ** 2 * se2 / (real_sd ** 2 + se2))
     z = (avg["value"] - centre) / avg["se"]
     avg["verdict"] = np.select([z > 1.96, z < -1.96], ["clearly above average", "clearly below average"], "can't tell from average")
     if nobody:
@@ -181,6 +203,11 @@ def present(title, avg, repeat_text, extra=(), note="", already_fair=False, nobo
     avg["player"] = names.reindex(avg.index).to_numpy()
     avg["+/-"] = 1.96 * avg["se"]
     avg["evidence"] = z                    # when fair estimates tie (no real spread), order by strength of evidence
+    # how sure is each RANK? draw every player's value from what is known about it and rank the draws
+    draw = np.random.default_rng(11)
+    sims = avg["fair estimate"].to_numpy()[:, None] + np.nan_to_num(post_sd)[:, None] * draw.standard_normal((len(avg), 1000))
+    ranks = (-sims).argsort(axis=0).argsort(axis=0) + 1
+    avg["rank range"] = [f"{int(a_)}-{int(b_)}" for a_, b_ in np.quantile(ranks, [0.025, 0.975], axis=1).T]
     avg = avg.sort_values(["fair estimate", "evidence"], ascending=False)
     above, below = (avg["verdict"] == "clearly above average").sum(), (avg["verdict"] == "clearly below average").sum()
     print(f"\n{title}")
@@ -191,7 +218,13 @@ def present(title, avg, repeat_text, extra=(), note="", already_fair=False, nobo
         print("  The data cannot tell players apart on this (see above), so nobody is flagged and the order below means nothing.")
     print(f"  {len(avg):,} players;{spread_text} clearly above average: {above}, clearly below: {below}"
           + ("" if already_fair else f" (luck alone would flag about {0.025 * len(avg):.0f} each way)"))
-    cols = ["player", "seasons", *extra, "value", "+/-", "fair estimate", "verdict"]
+    zero_spread = (not already_fair) and real_sd == 0
+    if zero_spread and not nobody:
+        print("  The real spread between players is 0: no player can be told apart from the average. The list below is")
+        print("  ordered only by the strength of each player's evidence, which is what luck alone produces.")
+    elif not nobody:
+        print("  rank range = the ranks each listed player could plausibly hold (95%), given the uncertainty of every player")
+    cols = ["player", "seasons", *extra, "value", "+/-", "fair estimate", "verdict"] + ([] if (nobody or zero_spread) else ["rank range"])
     fmt = {"value": "{:+.2f}".format, "+/-": "{:.2f}".format, "fair estimate": "{:+.2f}".format,
            **{c: "{:+.2f}".format for c in extra}}
     print(avg[cols].head(TOP).to_string(index=False, formatters=fmt))
@@ -354,7 +387,7 @@ def analyse(mask, label, with_overall):
         for c in ("off", "def"):
             avg[c] = effects.groupby("player_id")[c].mean()
         saved.append(present("STARTS IT - effect on his team's scoring margin whenever he is on the floor", avg,
-                             repeats(effects, "net"), extra=("off", "def"), already_fair=True,
+                             repeats(effects, "net", "net_se"), extra=("off", "def"), already_fair=True,
                              note="off = his team's offense, def = points the opponent scores (negative is good)"))
     inter, verdict, repeat_text, helps = interaction_model(np.flatnonzero(ok))
     inter["seasons"] = seasons_played.reindex(inter.index).fillna(0).astype(int)
@@ -421,7 +454,7 @@ def analyse(mask, label, with_overall):
     for col, title in (("creates", "CREDIT - points better than expected on the possessions he is credited on (involvement)"),
                        ("stops", "CREDIT WHEN MOMENTUM IS AGAINST - the same, counted more the more momentum was against his team (involvement)"),
                        ("lift", "LIFT (credit) - does he do more than his usual when momentum is against his team?")):
-        saved.append(present(title, season_average(v2, col, col + "_se"), repeats(v2, col)))
+        saved.append(present(title, season_average(v2, col, col + "_se"), repeats(v2, col, col + "_se")))
 
     # ---------------------------------------------------------------- VIEW 3
     print("\n" + "=" * 100 + f"\nVIEW 3 - WHAT HAPPENS AFTER HIS PLAYS (his team's momentum ahead, half-life {H:.1f})\n" + "=" * 100)
@@ -475,9 +508,9 @@ def analyse(mask, label, with_overall):
 
     creators, stoppers = after("ahead_lineup")
     saved.append(present("CREATES (after) - after his dunks, blocks, steals-and-scores and and-ones",
-                         season_average(creators, "value", "se"), repeats(creators, "value")))
+                         season_average(creators, "value", "se"), repeats(creators, "value", "se")))
     saved.append(present("STOPS (after) - after his baskets, counted more the more momentum was against his team",
-                         season_average(stoppers, "value", "se"), repeats(stoppers, "value")))
+                         season_average(stoppers, "value", "se"), repeats(stoppers, "value", "se")))
     for h, col in ((H_LO, "ahead_lineup_lo"), (H_HI, "ahead_lineup_hi")):
         c_, s_ = after(col)
         print(f"\n  Robustness - with a half-life of {h:g} instead of {H:.1f}:  creators repeat {repeats(c_, 'value')};")

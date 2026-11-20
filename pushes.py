@@ -146,6 +146,29 @@ def would_be_start(con, poss):
     return np.r_[6, end_cls[:-1]]                       # the possession before (never used for the first of a period)
 
 
+def repeat_words(r, luck):
+    """Plain words for a season-to-season correlation r. 'Luck' = the same correlation with the seasons paired at
+    random; only an r above 95% of those counts as repeating at all, and its size is then described with the usual
+    conventions for correlations (0.1 small, 0.3 medium, 0.5 large): a tiny r can pass the test with this much data
+    and still say almost nothing about next season."""
+    if r <= np.quantile(luck, 0.95):
+        return "no - looks like luck"
+    return "repeats " + ("strongly" if r >= 0.5 else "moderately" if r >= 0.3 else "weakly" if r >= 0.1 else "barely")
+
+
+def shuffled(a, b, corr, k=1000):
+    """The same correlation with the seasons paired at random, k times. Its own generator, so the answer never
+    depends on what ran before."""
+    g = np.random.default_rng(7)
+    return np.array([corr(a, g.permutation(b)) for _ in range(k)])
+
+
+def r_range(r, n):
+    """95% range of a correlation from n pairs (Fisher's z)."""
+    lo, hi = np.tanh(np.arctanh(r) + np.array([-1.96, 1.96]) / np.sqrt(max(n - 3, 1)))
+    return f"[95%: {lo:+.2f} to {hi:+.2f}]"
+
+
 # ============================================================== load data
 con = sqlite3.connect(DB)
 # make the database use the real (game, possession) indexes when joining tables; left to itself it
@@ -400,9 +423,7 @@ def player_table(events, floor_rows, floor_side, title, what, bench=False):
         a, b = pairs["rate"].to_numpy(), pairs["rate_next"].to_numpy()
         corr = lambda u, v: np.cov(u, v, aweights=wts)[0, 1] / np.sqrt(np.cov(u, u, aweights=wts)[0, 1] * np.cov(v, v, aweights=wts)[0, 1])
         r = corr(a, b)
-        luck = np.array([corr(a, rng.permutation(b)) for _ in range(1000)])
-        verdict = "a lasting trait" if r > np.quantile(luck, 0.99) else "weak hint" if r > np.quantile(luck, 0.95) else "no - looks like luck"
-        rep = f"{r:+.2f} over {len(pairs):,} pairs of seasons ({verdict})"
+        rep = f"{r:+.2f} {r_range(r, len(pairs))} over {len(pairs):,} pairs of seasons ({repeat_words(r, shuffled(a, b, corr))})"
     else:
         rep = "not enough seasons to say"
     # average of his seasons (by precision), pulled toward the league average by how much is luck
@@ -509,9 +530,7 @@ def usual_table(ps, title, what, phi, null):
         a, b = pairs["diff"].to_numpy(), pairs["diff_next"].to_numpy()
         corr = lambda u, v: np.cov(u, v, aweights=wts)[0, 1] / np.sqrt(np.cov(u, u, aweights=wts)[0, 1] * np.cov(v, v, aweights=wts)[0, 1])
         r = corr(a, b)
-        luck = np.array([corr(a, rng.permutation(b)) for _ in range(1000)])
-        verdict = "a lasting trait" if r > np.quantile(luck, 0.99) else "weak hint" if r > np.quantile(luck, 0.95) else "no - looks like luck"
-        rep = f"{r:+.2f} over {len(pairs):,} pairs of seasons ({verdict})"
+        rep = f"{r:+.2f} {r_range(r, len(pairs))} over {len(pairs):,} pairs of seasons ({repeat_words(r, shuffled(a, b, corr))})"
     else:
         rep = "not enough seasons to say"
     avg["player"], avg["+/-"] = names.reindex(avg.index).to_numpy(), 1.96 * avg["se"]
@@ -813,9 +832,8 @@ for SCOPE, label in ((False, "REGULAR SEASON"), (True, "PLAYOFFS")):
                          ("mom", "effect on his team's momentum after")):
             a, b = pairs[col].to_numpy(), pairs[f"{col}_next"].to_numpy()
             r = np.corrcoef(a, b)[0, 1]
-            luck = np.array([np.corrcoef(a, rng.permutation(b))[0, 1] for _ in range(5000)])
-            verdict = "a lasting trait" if r > np.quantile(luck, 0.99) else "weak hint" if r > np.quantile(luck, 0.95) else "no - looks like luck"
-            print(f"  Repeats?  {lab:42s} {r:+.2f} over {len(pairs)} pairs of seasons ({verdict})")
+            verdict = repeat_words(r, shuffled(a, b, lambda u, v: np.corrcoef(u, v)[0, 1], 5000))
+            print(f"  Repeats?  {lab:42s} {r:+.2f} {r_range(r, len(pairs))} over {len(pairs)} pairs of seasons ({verdict})")
     g = cs.groupby("coach")
     board = pd.DataFrame({"seasons": g.size(), "timeouts": g["timeouts"].sum(), "push strength when he calls it": g["strength"].mean()})
     spread, centres = {}, {}
