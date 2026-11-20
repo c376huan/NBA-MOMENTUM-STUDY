@@ -121,6 +121,26 @@ KNOT_PCT = [5, 27.5, 50, 72.5, 95]
 rng = np.random.default_rng(0)
 pd.set_option("display.width", 250)
 
+def would_be_start(con, poss):
+    """How the previous possession ended, from its last recorded play: after a made basket, a made free throw, a steal
+    (live ball, a fast break is possible), a dead-ball turnover, a defensive rebound by a player (live ball), a team
+    rebound (dead ball), or other. That is how the next possession would have started had nobody called a timeout.
+    The old covariate (scored / turnover / miss) put live and dead balls together; timeouts come almost only from
+    dead balls, so the comparison moments held several times more fast breaks than the timeouts did."""
+    ev = pd.read_sql_query("""SELECT game_id, poss_num, seconds_left, eventnum, eventmsgtype AS t, pts, player1_id AS p1, player2_id AS p2
+                              FROM events WHERE eventmsgtype IN (1, 2, 3, 4, 5) AND poss_num IS NOT NULL""", con)
+    last = ev.sort_values(["game_id", "poss_num", "seconds_left", "eventnum"], ascending=[True, True, False, True]).groupby(
+        ["game_id", "poss_num"], sort=False).tail(1)
+    team_id = lambda v: (v >= 1610612737) & (v <= 1610612766)     # team rebounds and team turnovers carry the team's id
+    p1, p2 = last["p1"].fillna(0).to_numpy(), last["p2"].fillna(0).to_numpy()
+    t, pts = last["t"].to_numpy(), last["pts"].fillna(0).to_numpy()
+    cls = np.select([t == 1, (t == 3) & (pts > 0), (t == 5) & (p2 > 0) & ~team_id(p2), t == 5, (t == 4) & (p1 > 0) & ~team_id(p1), t == 4],
+                    [0, 1, 2, 3, 4, 5], 6)
+    end_cls = pd.Series(cls, index=pd.MultiIndex.from_arrays([last["game_id"], last["poss_num"]])).reindex(
+        pd.MultiIndex.from_arrays([poss["game_id"], poss["poss_num"]])).fillna(6).astype(int).to_numpy()
+    return np.r_[6, end_cls[:-1]]                       # the possession before (never used for the first of a period)
+
+
 # ============================================================== load data
 con = sqlite3.connect(DB)
 # make the database use the real (game, possession) indexes when joining tables; left to itself it
@@ -129,7 +149,7 @@ con.execute("PRAGMA automatic_index = OFF")
 try:
     poss = pd.read_sql_query(
         """SELECT p.game_id, p.poss_num, p.season, p.playoffs, p.gamedate, p.period, p.seconds_left, p.is_home, p.home, p.away,
-                  p.starttype, p.points, p.def_points, p.turnovers, p.start_margin,
+                  p.starttype, p.points, p.def_points, p.turnovers, p.start_margin, p.end_seconds_left,
                   l.o1, l.o2, l.o3, l.o4, l.o5, l.d1, l.d2, l.d3, l.d4, l.d5, l.complete,
                   m.rate_raw, m.before_off, m.before_def, m.ahead_own, m.ahead_opp
            FROM poss p JOIN poss_momentum m USING (game_id, poss_num) JOIN lineups l USING (game_id, poss_num)
@@ -148,6 +168,7 @@ ev = pd.read_sql_query(
 timeouts = pd.read_sql_query(
     """SELECT game_id, period, seconds_left, homedescription AS home_txt, visitordescription AS away_txt
        FROM events WHERE eventmsgtype = 9""", con)
+start_class = would_be_start(con, poss) if not SKIP_TIMEOUTS else None
 con.close()
 
 n = len(poss)
@@ -568,13 +589,20 @@ key = gidx * 10_000 + period * 1_000 + (720 - clock)
 t_key = game_no.reindex(timeouts["game_id"]).to_numpy() * 10_000 + t_period * 1_000 + (720 - t_clock)
 tj = np.minimum(np.searchsorted(key, t_key, side="left"), n - 1)
 good = (game[tj] == timeouts["game_id"].to_numpy()) & (period[tj] == t_period)
+after_timeout = poss["starttype"].fillna("").to_numpy() == "Off Timeout"
+# A timeout whose clock falls inside the window of an "Off Timeout" possession belongs to that possession (the
+# possession is dated from the stoppage before it). Skipping these used to drop about half of the timeouts.
+j0 = np.maximum(tj - 1, 0)
+inside = ((game[j0] == timeouts["game_id"].to_numpy()) & (period[j0] == t_period) & (tj > 0) & (clock[j0] > t_clock)
+          & (t_clock >= poss["end_seconds_left"].to_numpy()[j0]))
+use_prev = after_timeout[j0] & inside & ~(good & (clock[tj] == t_clock) & after_timeout[tj])
+tj, good = np.where(use_prev, j0, tj), good | use_prev
 called_by, is_forced = np.zeros(n), np.zeros(n, bool)
 # who called it: the team named in its own description column. "Timeout: Official" (2015-17) and a few "Timeout:
 # Regular" lines name no team - an official's stoppage, nobody's choice - so they are left out like the TV slots.
 team_named = (timeouts["home_txt"].notna() | timeouts["away_txt"].notna()).to_numpy()
 called_by[tj[good]] = np.where(timeouts["home_txt"].notna(), 1, np.where(timeouts["away_txt"].notna(), -1, 0))[good]
 np.logical_or.at(is_forced, tj[good], (forced | ~team_named)[good])
-after_timeout = poss["starttype"].fillna("").to_numpy() == "Off Timeout"
 
 # how much FURTHER each side's push goes from every moment (points vs expectation still to be gained before its peak)
 c_before = cx[:-1]                                                       # home's running total before each possession
@@ -614,8 +642,7 @@ def spline(v):
                                    + cube(v - k[-1]) * (k[-2] - k[j]) / (k[-1] - k[-2])) / (k[-1] - k[0]) ** 2 for j in range(len(k) - 2)])
 
 
-prev_points = np.r_[0, poss["points"].to_numpy()[:-1]]
-prev_end = np.where(prev_points > 0, 0, np.where(np.r_[0, poss["turnovers"].fillna(0).to_numpy()[:-1]] > 0, 1, 2))[idx]
+prev_end = start_class[idx]                              # how the possession would have started (see would_be_start)
 margin = poss["start_margin"].to_numpy(float)[idx] * flip
 late = (period[idx] >= 4).astype(float)
 X = np.column_stack([np.ones(2 * R), has_ball, side == 1, spline(opp_strength), opp_strength * has_ball, mom / mom.std(),
