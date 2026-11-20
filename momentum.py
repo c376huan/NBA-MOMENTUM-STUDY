@@ -49,8 +49,11 @@ Parts:
     recent offense and (2) the opponent's recent offense, separately.
  C. Streakiness without cut-offs. Is the scoring margin over stretches of
     2, 4, 8, 16, 32 possessions more spread out than independent possessions
-    would give? Real games vs shuffled games vs a simulated "chain world"
-    that keeps only the mechanical link.
+    would give? Real games vs games in which each team's results are
+    shuffled over the whole game, vs a simulated "chain world" that keeps
+    only the mechanical link. (The shuffle uses the whole game because the
+    simulated worlds draw from the whole game; shuffling within quarters
+    instead made "left over" come out negative in a league with no momentum.)
  D. Plays. After a dunk, block, steal-and-score or and-one, the team's
     momentum going forward and its rate on each of its next five trips.
 
@@ -170,7 +173,7 @@ sub_keys = np.unique(game_no.reindex(subs["game_id"]).to_numpy() * 10_000 + subs
                      + (720 - subs["seconds_left"].to_numpy()))
 stint_no = np.searchsorted(sub_keys, key, side="right")
 new_stint = first | np.r_[True, stint_no[1:] != stint_no[:-1]]       # stint = stretch with no substitution
-GROUPS = {"quarter": np.cumsum(first) * 2 + home, "stint": np.cumsum(new_stint) * 2 + home}
+GROUPS = {"quarter": np.cumsum(first) * 2 + home, "stint": np.cumsum(new_stint) * 2 + home, "game": team_game}
 
 
 def shuffler(group):
@@ -445,9 +448,10 @@ def replay(keep_chain):
 
 
 print("\n\nC. STREAKINESS WITHOUT CUT-OFFS - how spread out is the scoring margin over stretches of k possessions,")
-print("   compared with independent possessions?  'excess' = real games vs shuffled games; 'the chain adds' = a")
-print("   simulated world with only the mechanical link vs one without it; 'left over' = what the chain doesn't explain.\n")
-worlds = {"shuffled": [net[DRAW["quarter"]()] * sign for _ in range(B)],
+print("   compared with independent possessions?  'excess' = real games vs games with each team's results shuffled over")
+print("   the whole game; 'the chain adds' = a simulated world with only the mechanical link vs one without it;")
+print("   'left over' = what the chain doesn't explain.\n")
+worlds = {"shuffled": [net[DRAW["game"]()] * sign for _ in range(B)],     # same pool as the simulated worlds
           "no link": [replay(False) * sign for _ in range(B)], "chain": [replay(True) * sign for _ in range(B)]}
 results_c = []
 for split, mask in SPLITS.items():
