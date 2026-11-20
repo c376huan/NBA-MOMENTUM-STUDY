@@ -35,10 +35,15 @@ COMPARED WITH WHAT? (the team's normal level, or how this game has been going?)
   The script measures that night-to-night spread itself (section A): if a
   team really were hotter or colder than normal for a whole game, two
   possessions from DIFFERENT quarters of that game would tend to fall on the
-  same side of expectation. In the NBA data they do not - the spread is
-  about zero, so the weight on tonight stays near 0% even after a full game
-  and pushes are measured against the normal level. At the opening tip m = 0,
-  so the comparison is the normal level anyway; no previous game is needed.
+  same side of expectation. This is measured on results with the possession
+  chain taken out: the chain ties one team's results to the other's (a team
+  that turns the ball over hands the opponent easy starts) and, in the
+  team-against-team view used here, hides the effect almost completely. With
+  the chain out, a team's level does vary from night to night, by about 2
+  points per 100 - but the luck in a single game moves it by about 8, so even
+  after a whole game tonight deserves only about 5% of the weight, and pushes
+  are measured against the normal level. At the opening tip m = 0, so the
+  comparison is the normal level anyway; no previous game is needed.
 
 PLAYERS (each team's biggest push in each game; bigger pushes count more)
   STARTS   he was credited on the first possession of the push
@@ -195,7 +200,9 @@ first_of_period = np.r_[True, (gidx[1:] != gidx[:-1]) | (period[1:] != period[:-
 # their results (each measured against expectation). If teams had good and bad nights beyond their normal
 # level, those products would average above zero; that average is the night-to-night variance of the level.
 # (Different quarters, so that one possession setting up the next does not count as a "good night".)
-by_quarter = pd.DataFrame({"g": gidx, "q": period, "x": x}).groupby(["g", "q"])["x"].agg(["sum", "size"])
+x_night = poss["rate_adj"].to_numpy() / 100 * sign          # chain removed: see "COMPARED WITH WHAT?" above
+SIGMA_NIGHT = x_night.std()
+by_quarter = pd.DataFrame({"g": gidx, "q": period, "x": x_night}).groupby(["g", "q"])["x"].agg(["sum", "size"])
 in_game = by_quarter.groupby("g").sum()
 pair_sum = (in_game["sum"] ** 2 - (by_quarter["sum"] ** 2).groupby("g").sum()).to_numpy()      # sum of x_i * x_j over such pairs
 pair_n = (in_game["size"] ** 2 - (by_quarter["size"] ** 2).groupby("g").sum()).to_numpy()      # number of such pairs
@@ -203,7 +210,7 @@ TONIGHT_VAR = pair_sum.sum() / pair_n.sum()
 boot_rng = np.random.default_rng(1)                         # its own generator, so the shuffles below are unchanged
 draws = (boot_rng.integers(0, G, G) for _ in range(1000))   # resample whole games to see how sure the estimate is
 TONIGHT_VAR_HI = np.quantile([pair_sum[d].sum() / pair_n[d].sum() for d in draws], 0.975)
-halves = pd.DataFrame({"g": gidx, "h": np.where(period <= 2, 1, 2), "x": x})[period <= 4].groupby(["g", "h"])["x"].mean().unstack()
+halves = pd.DataFrame({"g": gidx, "h": np.where(period <= 2, 1, 2), "x": x_night})[period <= 4].groupby(["g", "h"])["x"].mean().unstack()
 
 # ============================================================== A. find the pushes
 LMAX = game_len.max() + 1
@@ -296,11 +303,11 @@ if B:
           f"({real_adj.mean() / chance_adj.mean() - 1:+.1%}); {(real_adj > Z95_adj).mean():.1%} of real pushes beat the shuffled 95th percentile "
           f"(5.0% expected with no momentum).")
 spread = lambda v: 100 * np.sqrt(max(v, 0.0))                # variance -> points per 100 possessions
-weight = lambda v: 0.0 if v <= 0 else np.median(game_len) / (np.median(game_len) + SIGMA ** 2 / v)
-print(f"\n   Normal level, or how the game has been going?  First half against second half of the same game (both vs "
+weight = lambda v: 0.0 if v <= 0 else np.median(game_len) / (np.median(game_len) + SIGMA_NIGHT ** 2 / v)
+print(f"\n   Normal level, or how the game has been going?  (Results with the possession chain removed.)  First half against second half of the same game (both vs "
       f"expectation): correlation {halves[1].corr(halves[2]):+.3f}.")
 print(f"   True night-to-night spread of a team's level: {spread(TONIGHT_VAR):.1f} points per 100 (at most {spread(TONIGHT_VAR_HI):.1f}); "
-      f"luck alone moves one game by {100 * SIGMA / np.sqrt(np.median(game_len)):.1f}.")
+      f"luck alone moves one game by {100 * SIGMA_NIGHT / np.sqrt(np.median(game_len)):.1f}.")
 print(f"   So the game so far deserves a weight of {weight(TONIGHT_VAR):.1%} (at most {weight(TONIGHT_VAR_HI):.1%}) even after a whole game: "
       f"{'pushes are measured against the normal level.' if weight(TONIGHT_VAR_HI) < 0.10 else 'THE GAME SO FAR MATTERS HERE - blend it into the baseline.'}")
 big = pushes.sort_values("strength", ascending=False).head(5)
