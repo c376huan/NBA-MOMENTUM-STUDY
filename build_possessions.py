@@ -82,6 +82,7 @@ def clock_seconds(col):
 
 # ------------------------------------------------------------ play-by-play
 pbp = pd.read_sql_query("SELECT rowid AS pbp_id, * FROM pbp", con)
+pbp = pbp.drop_duplicates(["game_id", "eventnum"])        # a few hundred plays appear twice in the download
 need(pbp, ["game_id", "eventnum", "eventmsgtype", "period", "pctimestring", "score",
            "homedescription", "visitordescription", "player1_team_abbreviation"], "pbp")
 pbp["game_id"] = pd.to_numeric(pbp["game_id"], errors="coerce").astype("int64")
@@ -122,14 +123,14 @@ for side in ("home", "away"):
 # ------------------------------------------------------------- possessions
 # skip the two bulky text columns we never use (video link, full event list)
 raw_cols = [r[1] for r in con.execute("PRAGMA table_info(possessions)") if r[1] not in ("url", "events")]
-raw = pd.read_sql_query(f"SELECT {', '.join(raw_cols)} FROM possessions", con)
+raw = pd.read_sql_query(f"SELECT rowid AS rid, {', '.join(raw_cols)} FROM possessions", con)
 need(raw, ["gameid", "period", "starttime", "opponent", "startscoredifferential"], "possessions")
 raw = raw.rename(columns={"gameid": "game_id"})
 raw["game_id"] = pd.to_numeric(raw["game_id"], errors="coerce").astype("int64")
 has_desc = "description" in raw
 
-# one row per possession: drop the per-play column, keep distinct rows
-pos = raw.drop(columns=["description"] if has_desc else []).drop_duplicates()
+# one row per possession: drop the per-play columns, keep distinct rows
+pos = raw.drop(columns=["rid"] + (["description"] if has_desc else [])).drop_duplicates()
 pos = pos.join(games, on="game_id", how="inner")
 
 pos["seconds_left"] = clock_seconds(pos["starttime"])
@@ -179,6 +180,25 @@ if has_desc:
     link["dist"] = np.where((t <= link["p_start"]) & (t >= link["p_end"]), 0,
                             np.minimum((t - link["p_start"]).abs(), (t - link["p_end"]).abs()))
     link = link.sort_values(["pbp_id", "dist", "poss_num"]).drop_duplicates("pbp_id")
+    # Exact links first. Most rows of the possessions file carry the video link of their play, and the link holds
+    # the play's game and event number (.../0021500001/213/...). Text matching misses plays whose text is written
+    # differently in the two files - pbpstats writes "Marc Morris" or "G. Antetokounmpo" where stats.nba.com writes
+    # "Morris Sr." or "Antetokounmpo", which happens when teammates share a surname - and the possessions of those
+    # players then failed the points check. Text matching is kept for rows without a video link.
+    exact = []
+    for chunk in pd.read_sql_query("SELECT rowid AS rid, url FROM possessions WHERE url LIKE '%/%/%'", con, chunksize=500_000):
+        found = chunk["url"].str.extract(r"/0*(\d{7,9})/(\d+)/")
+        exact.append(pd.DataFrame({"rid": chunk["rid"], "url_game": pd.to_numeric(found[0], errors="coerce"),
+                                   "eventnum": pd.to_numeric(found[1], errors="coerce")}).dropna())
+    if exact:
+        exact = pd.concat(exact).astype({"url_game": "int64", "eventnum": "int64"})
+        exact = exact.merge(raw[["rid"] + key], on="rid")
+        exact = exact[exact["url_game"] == exact["game_id"]]          # the link must point into the same game
+        exact = (exact.merge(pos[key + ["poss_num"]], on=key)
+                 .merge(pbp[["pbp_id", "game_id", "eventnum"]], on=["game_id", "eventnum"])
+                 .drop_duplicates("pbp_id")[["pbp_id", "poss_num"]])
+        link = pd.concat([exact, link[~link["pbp_id"].isin(exact["pbp_id"])][["pbp_id", "poss_num"]]])
+        print(f"plays linked by the video link's event number: {len(exact):,}")
     pbp = pbp.merge(link[["pbp_id", "poss_num"]], on="pbp_id", how="left")
 else:
     pbp["poss_num"] = np.nan
