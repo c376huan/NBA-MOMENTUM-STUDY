@@ -9,14 +9,14 @@ NBA Momentum Study - run every step in order, with one command.
 
 Steps (each one reads the tables made by the ones before it):
     download_data  build_possessions  validate  download_coaches  build_lineups
-    expected  momentum  players  coaches  pushes
+    expected  impact  momentum  players  coaches  pushes
 With --fake the two download steps are skipped (the simulated league comes with its coaches).
 
 Every step's printout is shown and also saved to logs/<step>.txt next to the database (inside data/,
 so it is never committed). The run stops at the first step that fails.
 
 Rough times for the real data (ten seasons) on a recent laptop: building the tables about 5 minutes,
-expected.py 1 minute, momentum.py 5, players.py 2, coaches.py 1, pushes.py 2. The downloads need about
+expected.py 1 minute, impact.py 10, momentum.py 5, players.py 2, coaches.py 1, pushes.py 2. The downloads need about
 3 GB of disk for the raw files and 4 GB for the database.
 """
 
@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 STEPS = ["download_data", "build_possessions", "validate", "download_coaches", "build_lineups",
-         "expected", "momentum", "players", "coaches", "pushes"]
+         "expected", "impact", "momentum", "players", "coaches", "pushes"]
 HERE = Path(__file__).resolve().parent
 
 

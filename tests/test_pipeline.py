@@ -34,7 +34,7 @@ def run(script, db, *extra):
 
 def build(db, *planted):
     run("tests/make_fake_nba.py", db, "--games", str(GAMES), *planted)
-    for step in ("build_possessions.py", "build_lineups.py", "expected.py"):
+    for step in ("build_possessions.py", "build_lineups.py", "expected.py", "impact.py"):
         run(step, db)
     return run("momentum.py", db, "--shuffles", "10")
 

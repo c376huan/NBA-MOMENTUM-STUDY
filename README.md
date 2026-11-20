@@ -13,6 +13,7 @@ Python 3.13 with the packages in `requirements.txt` (`pip install -r requirement
     python run_all.py              # downloads the data (about 3 GB) and runs every step
     python run_all.py --fake 600   # a small simulated league instead: checks every step runs
     python tests/test_rates.py     # quick check of the momentum calculation
+    python tests/test_impact.py    # player impact against a simulated league with known truth
 
 The steps and their order are listed at the top of `run_all.py`; each script explains
 what it does at the top of the file.

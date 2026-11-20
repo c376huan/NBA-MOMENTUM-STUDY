@@ -15,7 +15,10 @@ swing. Nothing uses a hand-picked cut-off or a minimum number of games.
      OVERALL IMPACT  his effect on his team's scoring margin whenever he plays
                  (offense plus defense): adjusted plus-minus. This is a
                  player's QUALITY, not a momentum measure (earlier versions
-                 called it STARTS IT). One estimate per season.
+                 called it STARTS IT). Made by impact.py: all his seasons
+                 together, shot-making luck taken out as far as that helps
+                 predict games left out; without impact.py, the average of
+                 expected.py's single-season estimates.
      STOPS IT    how much MORE he helps when momentum is against his team,
                  split into scoring (his team's offense) and defense (the
                  opponent's offense), beyond his usual level when he plays.
@@ -98,6 +101,8 @@ try:
            FROM poss p JOIN poss_momentum m USING (game_id, poss_num) JOIN lineups l USING (game_id, poss_num)
            ORDER BY p.game_id, p.poss_num""", con)
     effects = pd.read_sql_query("SELECT * FROM player_effects", con)
+    tables = set(pd.read_sql_query("SELECT name FROM sqlite_master WHERE type = 'table'", con)["name"])
+    impact = pd.read_sql_query("SELECT * FROM player_impact", con).set_index("player_id") if "player_impact" in tables else None
     names = pd.read_sql_query("SELECT * FROM players", con).drop_duplicates("player_id").set_index("player_id")["player"]
     settings = pd.read_sql_query("SELECT * FROM momentum_settings", con).set_index("name")["value"]
     H, H_LO, H_HI = (float(settings[k]) for k in ("half_life", "half_life_lo", "half_life_hi"))
@@ -390,12 +395,18 @@ def analyse(mask, label, with_overall):
     # ---------------------------------------------------------------- VIEW 1
     print("\n" + "=" * 100 + "\nVIEW 1 - ON THE FLOOR (teammates and opponents accounted for)\n" + "=" * 100)
     if with_overall:
-        avg = season_average(effects, "net", "net_se")
-        for c in ("off", "def"):
-            avg[c] = effects.groupby("player_id")[c].mean()
+        if impact is not None:             # impact.py: all seasons together, shot luck out, honest uncertainty
+            avg = impact[["seasons", "impact", "se", "off", "def"]].rename(columns={"impact": "value"})
+            note = ("off = his team's offense, def = points the opponent scores (negative is good); against the average "
+                    "player of the same season; from impact.py")
+        else:                              # impact.py not run: the average of expected.py's single seasons
+            avg = season_average(effects, "net", "net_se")
+            for c in ("off", "def"):
+                avg[c] = effects.groupby("player_id")[c].mean()
+            note = "off = his team's offense, def = points the opponent scores (negative is good)"
         saved.append(present("OVERALL IMPACT - effect on his team's scoring margin whenever he is on the floor (adjusted plus-minus: quality, not momentum)", avg,
-                             repeats(effects, "net", "net_se"), extra=("off", "def"), already_fair=True,
-                             note="off = his team's offense, def = points the opponent scores (negative is good)"))
+                             "single seasons: " + repeats(effects, "net", "net_se"), extra=("off", "def"), already_fair=True,
+                             note=note))
     inter, verdict, repeat_text, helps = interaction_model(np.flatnonzero(ok))
     inter["seasons"] = seasons_played.reindex(inter.index).fillna(0).astype(int)
     print(f"\n  Do players differ in how they respond to momentum?  {verdict}.")
