@@ -146,7 +146,8 @@ ev = pd.read_sql_query(
               player1_id AS p1, player1_team_abbreviation AS t1, player2_id AS p2, player3_id AS p3
        FROM events WHERE poss_num IS NOT NULL AND eventmsgtype <= 5""", con)
 timeouts = pd.read_sql_query(
-    "SELECT game_id, period, seconds_left, homedescription AS home_txt FROM events WHERE eventmsgtype = 9", con)
+    """SELECT game_id, period, seconds_left, homedescription AS home_txt, visitordescription AS away_txt
+       FROM events WHERE eventmsgtype = 9""", con)
 con.close()
 
 n = len(poss)
@@ -568,8 +569,11 @@ t_key = game_no.reindex(timeouts["game_id"]).to_numpy() * 10_000 + t_period * 1_
 tj = np.minimum(np.searchsorted(key, t_key, side="left"), n - 1)
 good = (game[tj] == timeouts["game_id"].to_numpy()) & (period[tj] == t_period)
 called_by, is_forced = np.zeros(n), np.zeros(n, bool)
-called_by[tj[good]] = np.where(timeouts["home_txt"].notna(), 1, -1)[good]
-np.logical_or.at(is_forced, tj[good], forced[good])
+# who called it: the team named in its own description column. "Timeout: Official" (2015-17) and a few "Timeout:
+# Regular" lines name no team - an official's stoppage, nobody's choice - so they are left out like the TV slots.
+team_named = (timeouts["home_txt"].notna() | timeouts["away_txt"].notna()).to_numpy()
+called_by[tj[good]] = np.where(timeouts["home_txt"].notna(), 1, np.where(timeouts["away_txt"].notna(), -1, 0))[good]
+np.logical_or.at(is_forced, tj[good], (forced | ~team_named)[good])
 after_timeout = poss["starttype"].fillna("").to_numpy() == "Off Timeout"
 
 # how much FURTHER each side's push goes from every moment (points vs expectation still to be gained before its peak)

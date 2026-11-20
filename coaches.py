@@ -82,7 +82,8 @@ try:
 except Exception as e:
     raise SystemExit(f"Run momentum.py and download_coaches.py first. [{e}]")
 timeouts = pd.read_sql_query(
-    "SELECT game_id, period, seconds_left, homedescription AS home_txt FROM events WHERE eventmsgtype = 9", con)
+    """SELECT game_id, period, seconds_left, homedescription AS home_txt, visitordescription AS away_txt
+       FROM events WHERE eventmsgtype = 9""", con)
 con.close()
 
 n = len(poss)
@@ -112,12 +113,16 @@ tj = np.minimum(np.searchsorted(key, t_key, side="left"), n - 1)             # t
 good = (game[tj] == timeouts["game_id"].to_numpy()) & (period[tj] == t_period)
 called_by = np.zeros(n)                                                       # +1 home / -1 away
 is_forced = np.zeros(n, bool)
-called_by[tj[good]] = np.where(timeouts["home_txt"].notna(), 1, -1)[good]
-np.logical_or.at(is_forced, tj[good], forced[good])
+# who called it: the team named in its own description column. "Timeout: Official" (2015-17) and a few "Timeout:
+# Regular" lines name no team - an official's stoppage, nobody's choice - so they are left out like the TV slots.
+team_named = (timeouts["home_txt"].notna() | timeouts["away_txt"].notna()).to_numpy()
+called_by[tj[good]] = np.where(timeouts["home_txt"].notna(), 1, np.where(timeouts["away_txt"].notna(), -1, 0))[good]
+np.logical_or.at(is_forced, tj[good], (forced | ~team_named)[good])
 after_timeout = poss["starttype"].fillna("").to_numpy() == "Off Timeout"
 print(f"Reference half-life from momentum.py: {H:.1f}.  Unit: points per 100 possessions.")
 print(f"Timeouts in the data: {good.sum():,}; left out as forced TV slots: {forced[good].sum():,} "
-      f"({forced[good].mean():.0%}); coach-chosen: {(~forced[good]).sum():,}")
+      f"({forced[good].mean():.0%}); official, no team named: {(~team_named & ~forced)[good].sum():,}; "
+      f"coach-chosen: {(team_named & ~forced)[good].sum():,}")
 print("Only timeouts followed by the start of a new possession can be studied (about half of them);")
 print("a timeout taken in the middle of a possession is not covered.\n")
 
