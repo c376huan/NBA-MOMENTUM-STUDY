@@ -475,22 +475,10 @@ def on_side(rows_, side):
             np.where(off, usual_off[rows_], usual_def[rows_]))
 
 
-def usual_table(ps, title, what, phi):
-    """ps: one row per player-season with actual, usual, the standard error of the difference and n = how much
-    there was to go on. Seasons and players are weighted by n (how much he played), not by 1 / se^2: a
-    player with two plays and a tiny usual chance has a tiny se and would otherwise outweigh everybody."""
+def usual_average(ps):
+    """Average of each player's seasons (weighted by n, how much he played), the real spread between players, the
+    fair estimate and the verdict. Returns the cleaned player-seasons, the player table and the real variance."""
     ps = ps[np.isfinite(ps["se"]) & (ps["se"] > 0) & (ps["n"] > 0)].assign(diff=lambda d: d["actual"] - d["usual"])
-    pairs = ps.merge(ps.assign(season=ps["season"] - 1), on=["pid", "season"], suffixes=("", "_next"))
-    if len(pairs) >= 30:
-        wts = 1 / (1 / pairs["n"] + 1 / pairs["n_next"])
-        a, b = pairs["diff"].to_numpy(), pairs["diff_next"].to_numpy()
-        corr = lambda u, v: np.cov(u, v, aweights=wts)[0, 1] / np.sqrt(np.cov(u, u, aweights=wts)[0, 1] * np.cov(v, v, aweights=wts)[0, 1])
-        r = corr(a, b)
-        luck = np.array([corr(a, rng.permutation(b)) for _ in range(1000)])
-        verdict = "a lasting trait" if r > np.quantile(luck, 0.99) else "weak hint" if r > np.quantile(luck, 0.95) else "no - looks like luck"
-        rep = f"{r:+.2f} over {len(pairs):,} pairs of seasons ({verdict})"
-    else:
-        rep = "not enough seasons to say"
     wt = ps["n"]
     g = ps.assign(wt=wt, aw=ps["actual"] * wt, uw=ps["usual"] * wt, dw=ps["diff"] * wt, vw=(ps["se"] * wt) ** 2).groupby("pid")
     avg = pd.DataFrame({"seasons": g.size(), "pushes a season": g["pushes"].mean(), "in pushes": g["aw"].sum() / g["wt"].sum(),
@@ -505,14 +493,37 @@ def usual_table(ps, title, what, phi):
     plays = typical * (1 - typical) / avg["se"] ** 2                              # how many plays the estimate rests on
     z = np.sign(avg["difference"]) * np.maximum(avg["difference"].abs() - 0.5 / plays, 0) / avg["se"]
     avg["verdict"] = np.select([z > 1.96, z < -1.96], ["clearly more than his usual", "clearly less than his usual"], "can't tell from his usual")
-    avg["player"], avg["+/-"], avg["evidence"] = names.reindex(avg.index).to_numpy(), 1.96 * avg["se"], z
+    avg["evidence"] = z
+    return ps, avg, real_var
+
+
+def usual_table(ps, title, what, phi, null):
+    """ps: one row per player-season with actual, usual, the standard error of the difference and n = how much
+    there was to go on. Seasons and players are weighted by n (how much he played), not by 1 / se^2: a
+    player with two plays and a tiny usual chance has a tiny se and would otherwise outweigh everybody.
+    null: flags (more, less) in leagues simulated with every player doing exactly his usual."""
+    ps, avg, real_var = usual_average(ps)
+    pairs = ps.merge(ps.assign(season=ps["season"] - 1), on=["pid", "season"], suffixes=("", "_next"))
+    if len(pairs) >= 30:
+        wts = 1 / (1 / pairs["n"] + 1 / pairs["n_next"])
+        a, b = pairs["diff"].to_numpy(), pairs["diff_next"].to_numpy()
+        corr = lambda u, v: np.cov(u, v, aweights=wts)[0, 1] / np.sqrt(np.cov(u, u, aweights=wts)[0, 1] * np.cov(v, v, aweights=wts)[0, 1])
+        r = corr(a, b)
+        luck = np.array([corr(a, rng.permutation(b)) for _ in range(1000)])
+        verdict = "a lasting trait" if r > np.quantile(luck, 0.99) else "weak hint" if r > np.quantile(luck, 0.95) else "no - looks like luck"
+        rep = f"{r:+.2f} over {len(pairs):,} pairs of seasons ({verdict})"
+    else:
+        rep = "not enough seasons to say"
+    avg["player"], avg["+/-"] = names.reindex(avg.index).to_numpy(), 1.96 * avg["se"]
     avg = avg.sort_values(["fair estimate", "evidence"], ascending=False)
     print(f"\n{title}")
     print(f"  {what}")
     print(f"  Repeats?  {rep}")
     print(f"  {len(avg):,} players; real spread between players {np.sqrt(real_var):.1%}; clearly more than usual: "
           f"{(avg['verdict'] == 'clearly more than his usual').sum()}, clearly less: {(avg['verdict'] == 'clearly less than his usual').sum()} "
-          f"(luck alone would flag about {0.025 * len(avg):.0f} each way); plays in the same push move together x{phi:.2f}")
+          f"(with every player doing exactly his usual, the same rule flags {null[:, 0].mean():.0f} more and {null[:, 1].mean():.0f} less "
+          f"on average, at most about {np.quantile(null[:, 0], 0.95):.0f} and {np.quantile(null[:, 1], 0.95):.0f}); "
+          f"plays in the same push move together x{phi:.2f}")
     cols = ["player", "seasons", "pushes a season", "in pushes", "his usual", "difference", "+/-", "fair estimate", "verdict"]
     pct = "{:.1%}".format
     signed = "{:+.1%}".format
@@ -521,20 +532,39 @@ def usual_table(ps, title, what, phi):
     return avg.reset_index().assign(measure=title.split(" - ")[0], games="playoffs" if SCOPE else "regular season")[["games", "measure", "pid", *cols]]
 
 
+NULL_DRAWS = 20
+
+
+def null_flags(build, chance):
+    """How many players the verdict rule flags in leagues where every credited play is drawn from the players' usual
+    chances, i.e. where nobody does more or less than his usual. This is the honest benchmark: the rule takes half a
+    play off before judging and usual chances are small and lopsided, so it is not simply 2.5% of players each way."""
+    sim = np.random.default_rng(5)
+    flags = []
+    for _ in range(NULL_DRAWS):
+        _, avg_sim, _ = usual_average(build(sim.random(chance.shape) < chance)[0])
+        flags.append(((avg_sim["verdict"] == "clearly more than his usual").sum(), (avg_sim["verdict"] == "clearly less than his usual").sum()))
+    return np.array(flags)
+
+
 def usual_rate(rows_, side_, title, what):
     """One play per push (the one that started it, or the one that ended it): how often it was his,
     against how often his usual share of such plays says it would be. Bigger pushes count more."""
     use = (rows_ >= 0) & complete[np.maximum(rows_, 0)] & (playoffs[st] == SCOPE)
     who, did, chance = on_side(rows_[use], side_[use])
     w = np.repeat(pushes["gain"].to_numpy()[use], 5)
-    d = pd.DataFrame({"pid": who.ravel(), "season": np.repeat(pushes["season"].to_numpy()[use], 5), "w": w, "a": w * did.ravel(),
-                      "e": w * chance.ravel(), "v": w ** 2 * (chance * (1 - chance)).ravel(), "r2": w ** 2 * ((did - chance) ** 2).ravel(),
-                      "w2": w ** 2})
-    phi = d["r2"].sum() / d["v"].sum()                          # 1 = exactly coin-flip luck
-    g = d.groupby(["pid", "season"])
-    ps = pd.DataFrame({"pushes": g.size(), "actual": g["a"].sum() / g["w"].sum(), "usual": g["e"].sum() / g["w"].sum(),
-                       "se": np.sqrt(phi * g["v"].sum()) / g["w"].sum(), "n": g["w"].sum() ** 2 / g["w2"].sum()}).reset_index()
-    return usual_table(ps, title, what, phi)
+
+    def build(did_):
+        d = pd.DataFrame({"pid": who.ravel(), "season": np.repeat(pushes["season"].to_numpy()[use], 5), "w": w, "a": w * did_.ravel(),
+                          "e": w * chance.ravel(), "v": w ** 2 * (chance * (1 - chance)).ravel(), "r2": w ** 2 * ((did_ - chance) ** 2).ravel(),
+                          "w2": w ** 2})
+        phi_ = d["r2"].sum() / d["v"].sum()                     # 1 = exactly coin-flip luck
+        g = d.groupby(["pid", "season"])
+        return pd.DataFrame({"pushes": g.size(), "actual": g["a"].sum() / g["w"].sum(), "usual": g["e"].sum() / g["w"].sum(),
+                             "se": np.sqrt(phi_ * g["v"].sum()) / g["w"].sum(), "n": g["w"].sum() ** 2 / g["w2"].sum()}).reset_index(), phi_
+
+    ps, phi = build(did)
+    return usual_table(ps, title, what, phi, null_flags(build, chance))
 
 
 def usual_share(title, what):
@@ -546,17 +576,21 @@ def usual_share(title, what):
     rows_, push_, side_ = rows_[use], push_[use], side_[use]
     who, did, chance = on_side(rows_, side_)
     v = (x[rows_] * side_)[:, None]                             # what the possession was worth to the pushing team
-    d = pd.DataFrame({"pid": who.ravel(), "push": np.repeat(push_, 5), "a": (v * did).ravel(), "e": (v * chance).ravel(),
-                      "d": np.repeat(v[:, 0] * did.sum(axis=1), 5), "v": (v ** 2 * chance * (1 - chance)).ravel()})
-    per_push = d.groupby(["pid", "push"], sort=False)[["a", "e", "d", "v"]].sum().reset_index()
-    phi = ((per_push["a"] - per_push["e"]) ** 2).sum() / per_push["v"].sum()
-    per_push["season"] = pushes["season"].to_numpy()[per_push["push"].to_numpy()]
-    g = per_push.groupby(["pid", "season"])
-    tot = g[["a", "e", "d", "v"]].sum().assign(pushes=g.size()).reset_index()
-    tot = tot[tot["d"] > 0]                                     # a share needs some credit to be a share of
-    ps = pd.DataFrame({"pid": tot["pid"], "season": tot["season"], "pushes": tot["pushes"], "actual": tot["a"] / tot["d"],
-                       "usual": tot["e"] / tot["d"], "se": np.sqrt(phi * tot["v"]) / tot["d"], "n": tot["d"]})
-    return usual_table(ps, title, what, phi)
+
+    def build(did_):
+        d = pd.DataFrame({"pid": who.ravel(), "push": np.repeat(push_, 5), "a": (v * did_).ravel(), "e": (v * chance).ravel(),
+                          "d": np.repeat(v[:, 0] * did_.sum(axis=1), 5), "v": (v ** 2 * chance * (1 - chance)).ravel()})
+        per_push = d.groupby(["pid", "push"], sort=False)[["a", "e", "d", "v"]].sum().reset_index()
+        phi_ = ((per_push["a"] - per_push["e"]) ** 2).sum() / per_push["v"].sum()
+        per_push["season"] = pushes["season"].to_numpy()[per_push["push"].to_numpy()]
+        g = per_push.groupby(["pid", "season"])
+        tot = g[["a", "e", "d", "v"]].sum().assign(pushes=g.size()).reset_index()
+        tot = tot[tot["d"] > 0]                                 # a share needs some credit to be a share of
+        return pd.DataFrame({"pid": tot["pid"], "season": tot["season"], "pushes": tot["pushes"], "actual": tot["a"] / tot["d"],
+                             "usual": tot["e"] / tot["d"], "se": np.sqrt(phi_ * tot["v"]) / tot["d"], "n": tot["d"]}), phi_
+
+    ps, phi = build(did)
+    return usual_table(ps, title, what, phi, null_flags(build, chance))
 
 
 saved, saved_usual = [], []
