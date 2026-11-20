@@ -204,11 +204,17 @@ def present(title, avg, repeat_text, extra=(), note="", already_fair=False, nobo
     avg["player"] = names.reindex(avg.index).to_numpy()
     avg["+/-"] = 1.96 * avg["se"]
     avg["evidence"] = z                    # when fair estimates tie (no real spread), order by strength of evidence
-    # how sure is each RANK? draw every player's value from what is known about it and rank the draws
+    # How sure is each RANK? Draw every player's value from what is known about it and rank the draws. Ranks are
+    # taken among the better-measured half of the players (standard error at most the median): players with a few
+    # minutes are so uncertain that their draws land anywhere, and would push everybody's rank around.
+    measured = (avg["se"] <= avg["se"].median()).to_numpy()
     draw = np.random.default_rng(11)
-    sims = avg["fair estimate"].to_numpy()[:, None] + np.nan_to_num(post_sd)[:, None] * draw.standard_normal((len(avg), 1000))
+    sims = (avg["fair estimate"].to_numpy()[measured, None]
+            + np.nan_to_num(post_sd[measured])[:, None] * draw.standard_normal((measured.sum(), 1000)))
     ranks = (-sims).argsort(axis=0).argsort(axis=0) + 1
-    avg["rank range"] = [f"{int(a_)}-{int(b_)}" for a_, b_ in np.quantile(ranks, [0.025, 0.975], axis=1).T]
+    rr = np.full(len(avg), "-", dtype=object)
+    rr[measured] = [f"{int(a_)}-{int(b_)}" for a_, b_ in np.quantile(ranks, [0.025, 0.975], axis=1).T]
+    avg["rank range"] = rr
     avg = avg.sort_values(["fair estimate", "evidence"], ascending=False)
     above, below = (avg["verdict"] == "clearly above average").sum(), (avg["verdict"] == "clearly below average").sum()
     print(f"\n{title}")
@@ -224,7 +230,7 @@ def present(title, avg, repeat_text, extra=(), note="", already_fair=False, nobo
         print("  The real spread between players is 0: no player can be told apart from the average. The list below is")
         print("  ordered only by the strength of each player's evidence, which is what luck alone produces.")
     elif not nobody:
-        print("  rank range = the ranks each listed player could plausibly hold (95%), given the uncertainty of every player")
+        print("  rank range = the ranks each listed player could plausibly hold (95%) among the better-measured half of players")
     cols = ["player", "seasons", *extra, "value", "+/-", "fair estimate", "verdict"] + ([] if (nobody or zero_spread) else ["rank range"])
     fmt = {"value": "{:+.2f}".format, "+/-": "{:.2f}".format, "fair estimate": "{:+.2f}".format,
            **{c: "{:+.2f}".format for c in extra}}
