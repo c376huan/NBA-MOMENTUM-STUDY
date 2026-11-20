@@ -41,13 +41,20 @@ COMPARED WITH WHAT? (the team's normal level, or how this game has been going?)
   so the comparison is the normal level anyway; no previous game is needed.
 
 PLAYERS (each team's biggest push in each game; bigger pushes count more)
-  STARTS   he made the first play of the push (the basket or assist, or the
-           steal, block or defensive rebound that began it)
-  LEADS    he contributed most to it: points better than expected on the
-           possessions he finished or assisted, plus points saved on the
+  STARTS   he was credited on the first possession of the push
+  LEADS    he had the most credit within it: points better than expected on
+           the possessions he finished or assisted, plus points saved on the
            defensive possessions he ended
-  STOPS    he made the play that ended the OTHER team's push (the answering
-           basket or assist, or the steal, block or rebound)
+  STOPS    he was credited on the possession right after the OTHER team's
+           push (the one that ended it)
+  "Credited" = any play recorded for him on that possession: a shot (made or
+  missed), free throws, a turnover, an assist, a steal, a block or a defensive
+  rebound. These three lists measure INVOLVEMENT. A push's first possession is
+  good for the pushing team by construction and the one after it is bad, so
+  the players credited most often are simply those involved in the most plays
+  all the time: a player's share of his team's credited plays explains the
+  differences between players in these lists completely. Whether anyone does
+  MORE than his usual during pushes is the next section.
   Each is a rate: out of the pushes that happened while he was on the floor.
   Worked out season by season, averaged (each season counting by how much
   information it holds), pulled toward the league average according to how
@@ -507,21 +514,23 @@ for SCOPE, label in ((False, "REGULAR SEASON"), (True, "PLAYOFFS")):
     if not (playoffs == SCOPE).any():
         continue
     print(f"\n\nB. PLAYERS - {label}  (rate = share of the pushes that happened while he was on the floor; bigger pushes count more)")
+    print("   These lists measure involvement: whoever is involved in most plays is involved in most pushes, and their")
+    print("   season-to-season repeatability is the repeatability of involvement. B3 asks whether anyone does more than his usual.")
     side_ = pushes["side"].to_numpy()
-    saved.append(player_table(starters, st, side_, "STARTS - made the first play of his team's push",
-                              "the basket or assist, or the steal, block or defensive rebound, that began it"))
-    saved.append(player_table(leaders, st, side_, "LEADS - contributed most to his team's push",
+    saved.append(player_table(starters, st, side_, "STARTS - credited on the first possession of his team's push (involvement)",
+                              "any play credited to him on that possession: a shot (made or missed), free throws, a turnover, an assist, a steal, a block or a defensive rebound"))
+    saved.append(player_table(leaders, st, side_, "LEADS - most credit within his team's push (involvement)",
                               "points better than expected on plays he finished or assisted, plus points saved on defense; "
                               "if all five shared equally this would be 20%"))
-    saved.append(player_table(enders, end_row.to_numpy(), -side_, "STOPS - made the play that ended the other team's push",
-                              "the answering basket or assist, or the steal, block or defensive rebound"))
+    saved.append(player_table(enders, end_row.to_numpy(), -side_, "STOPS - credited on the possession right after the other team's push (involvement)",
+                              "any play credited to him on that possession: a shot (made or missed), free throws, a turnover, an assist, a steal, a block or a defensive rebound"))
     print(f"\n\nB2. BENCH PLAYERS - {label}  (only the games in which he did NOT start; compared with other bench players)")
-    saved.append(player_table(starters, st, side_, "BENCH STARTS - came off the bench and made the first play of his team's push",
-                              "the basket or assist, or the steal, block or defensive rebound, that began it", bench=True))
-    saved.append(player_table(leaders, st, side_, "BENCH LEADS - came off the bench and contributed most to his team's push",
+    saved.append(player_table(starters, st, side_, "BENCH STARTS - off the bench, credited on the first possession of his team's push (involvement)",
+                              "any play credited to him on that possession: a shot (made or missed), free throws, a turnover, an assist, a steal, a block or a defensive rebound", bench=True))
+    saved.append(player_table(leaders, st, side_, "BENCH LEADS - off the bench, most credit within his team's push (involvement)",
                               "points better than expected on plays he finished or assisted, plus points saved on defense", bench=True))
-    saved.append(player_table(enders, end_row.to_numpy(), -side_, "BENCH STOPS - came off the bench and made the play that ended the other team's push",
-                              "the answering basket or assist, or the steal, block or defensive rebound", bench=True))
+    saved.append(player_table(enders, end_row.to_numpy(), -side_, "BENCH STOPS - off the bench, credited right after the other team's push (involvement)",
+                              "any play credited to him on that possession: a shot (made or missed), free throws, a turnover, an assist, a steal, a block or a defensive rebound", bench=True))
     print(f"\n\nB3. MORE THAN HIS USUAL - {label}  (the same plays, compared with the player's own usual share of such plays; "
           f"positive = he does more during pushes than he normally does)")
     saved_usual.append(usual_rate(st, side_, "STARTS MORE THAN HIS USUAL - made the first play of his team's push more often than his usual share says",
