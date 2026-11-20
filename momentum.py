@@ -63,6 +63,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))    # so "python -I momentum.py" still finds rates.py next to it
+from rates import Rates  # noqa: E402
+
 
 def arg(name, default):
     return type(default)(sys.argv[sys.argv.index(name) + 1]) if name in sys.argv else default
@@ -132,45 +135,8 @@ everything = np.ones(n, bool)
 team_game = gidx * 2 + home
 
 # ------------------------------------------------- momentum = recency-weighted rates
-
-
-class Rates:
-    """Recency-weighted scoring rate of each team, forwards or backwards in time.
-
-    For one team: rate <- keep * rate + (1 - keep) * (this possession), updated
-    only on its own offensive possessions, starting from 0 each game.
-    keep = 0.5 ** (1 / half_life).
-    """
-
-    def __init__(self, backwards_in_time=False):
-        self.rev = backwards_in_time
-        tg, self.home, self.g = (a[::-1] if self.rev else a for a in (team_game, home, gidx))
-        self.order = np.argsort(tg, kind="stable")                 # each team's own possessions, in order
-        tgs = tg[self.order]
-        self.start = np.r_[True, tgs[1:] != tgs[:-1]]
-        self.start_idx = np.maximum.accumulate(np.where(self.start, pos, 0))
-        self.t = pos - self.start_idx                               # 0, 1, 2 ... within the team's game
-        self.last_home = np.maximum.accumulate(np.where(self.home, pos, -1))
-        self.last_away = np.maximum.accumulate(np.where(~self.home, pos, -1))
-
-    def __call__(self, x, half_life):
-        """Returns (home team's rate, away team's rate) after each possession, counting it."""
-        keep = 0.5 ** (1 / half_life)
-        xs = (x[::-1] if self.rev else x)[self.order]
-        z = xs * keep ** (-self.t)
-        c = np.cumsum(z)
-        c = c - (c - z)[self.start_idx]                             # running total within the team's game
-        own = np.empty(n)
-        own[self.order] = (1 - keep) * keep ** self.t * c           # rate of the team with the ball, incl. this one
-        out = []
-        for last_idx in (self.last_home, self.last_away):
-            ok = (last_idx >= 0) & (self.g[np.maximum(last_idx, 0)] == self.g)
-            v = np.where(ok, own[np.maximum(last_idx, 0)], 0.0)
-            out.append(v[::-1] if self.rev else v)
-        return out
-
-
-past, future = Rates(), Rates(backwards_in_time=True)
+# The update itself lives in rates.py (see there for why it is a short loop and not one big formula).
+past, future = Rates(gidx, home), Rates(gidx, home, backwards_in_time=True)
 
 
 def momentum_before(x, half_life):
